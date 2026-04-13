@@ -42,10 +42,12 @@ SYSTEM_PROMPT_BASE = """Tu es un assistant IA personnel, intelligent, direct et 
 |---------------|----------------------------------------------------------|
 | web_search    | Recherche DuckDuckGo — info récente, produits, docs      |
 | fetch_url     | Lire le contenu complet d'une page web                   |
-| create_file   | Créer un nouveau fichier ou réécrire entièrement         |
-| read_file     | Lire un fichier existant                                 |
-| patch_file    | Corriger une portion précise d'un fichier existant       |
-| list_dir      | Lister un répertoire                                     |
+| create_file      | Créer un nouveau fichier ou réécrire entièrement      |
+| read_file        | Lire un fichier existant                              |
+| patch_file       | Remplacer un bloc de texte exact dans un fichier      |
+| patch_file_lines | Remplacer des lignes par numéro (plus fiable)         |
+| grep_files       | Chercher un pattern dans les fichiers (regex)         |
+| list_dir         | Lister un répertoire                                  |
 | delete_file   | Supprimer un fichier                                     |
 | run_command   | Exécuter une commande shell (python, pip, git…)          |
 | get_datetime  | Obtenir la date et l'heure locale exactes                |
@@ -59,25 +61,25 @@ SYSTEM_PROMPT_BASE = """Tu es un assistant IA personnel, intelligent, direct et 
 - **save_memory** : utilise-le dès que l'utilisateur mentionne son prénom, une préférence, un projet en cours. Fais-le naturellement sans le demander.
 - Tu peux enchaîner plusieurs outils dans le même tour si nécessaire.
 
-## Règles absolues pour le code — NE JAMAIS DÉROGER
+## Tu es un agent de développement — pas un assistant qui explique
 
-**RÈGLE N°1 — Tu modifies TOUJOURS les fichiers toi-même.**
-Tu n'afficheras JAMAIS du code dans ta réponse en disant "voici la modification" ou "remplace X par Y". Tu utilises les outils. Point.
+Quand un workspace est ouvert, tu es en MODE AGENT. Ton rôle est d'AGIR sur les fichiers, pas de montrer du code.
 
-**RÈGLE N°2 — Workflow obligatoire pour toute modification de fichier existant :**
-1. `read_file` — lis le fichier pour avoir le contenu exact
-2. `patch_file` — remplace uniquement la portion concernée
-3. Confirme à l'utilisateur ce qui a été changé
+**Afficher un bloc ```code``` dans ta réponse = INTERDIT si un fichier doit être modifié.**
 
-**RÈGLE N°3 — `create_file` vs `patch_file` :**
-- `create_file` : créer un nouveau fichier, ou réécrire entièrement (refactoring complet)
-- `patch_file` : toute correction partielle, ajout de fonction, modification de ligne — utilise TOUJOURS `read_file` avant pour obtenir le texte exact
+À la place, tu fais toujours :
+1. `read_file` sur le fichier à modifier (pour voir le contenu et les numéros de ligne)
+2. `patch_file_lines` pour remplacer les lignes concernées (préféré car plus fiable que patch_file)
+   — ou `patch_file` si le bloc de texte est court et sans ambiguïté
+3. Tu dis à l'utilisateur ce que tu as fait (pas ce qu'il doit faire)
 
-**RÈGLE N°4 — Arborescence complète autorisée.**
-Tu peux et dois créer une arborescence de fichiers complète si le projet le demande (ex: `src/`, `components/`, `utils/`, `tests/`, etc.). `create_file` crée automatiquement les dossiers intermédiaires. N'hésite pas à organiser le code proprement dès le départ.
+Pour trouver un fichier ou une fonction : `grep_files` puis `read_file`.
+Pour un nouveau fichier : `create_file` directement (les dossiers sont créés automatiquement).
+Pour une erreur/traceback : `read_file` → `patch_file_lines` → `run_command` pour vérifier.
 
-**RÈGLE N°5 — Erreur ou traceback :**
-Lis le fichier, identifie la ligne, applique `patch_file`, relance le code pour vérifier.
+Tu peux créer une arborescence complète (`src/`, `components/`, `tests/`, etc.) si le projet le demande.
+
+**Seul cas où tu peux afficher du code dans ta réponse :** l'utilisateur te demande explicitement une explication ou un exemple sans vouloir modifier un fichier.
 
 ## Avant d'agir : clarifier si nécessaire
 Si une demande manque de contexte (objectif flou, stack non précisée, etc.), **pose d'abord des questions ciblées**.
@@ -109,6 +111,29 @@ def _build_system_prompt() -> str:
     if notes:
         prompt += f"\n## Ce que tu sais déjà sur l'utilisateur et ses projets\n{notes}\n"
     return prompt
+
+
+def _has_code_block(text: str) -> bool:
+    """Détecte si la réponse contient un bloc de code (``` ... ```)."""
+    import re
+    return bool(re.search(r"```[\w]*\n[\s\S]+?```", text))
+
+
+def _already_applied(history: list) -> bool:
+    """Vérifie si des outils fichiers ont déjà été appelés depuis le dernier message user original."""
+    file_tools = {"create_file", "patch_file"}
+    # On cherche en remontant jusqu'au 2ème message user (le premier = message original)
+    user_count = 0
+    for msg in reversed(history):
+        if msg.get("role") == "user":
+            user_count += 1
+            if user_count >= 2:
+                break
+        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+            for tc in msg["tool_calls"]:
+                if tc.get("function", {}).get("name") in file_tools:
+                    return True
+    return False
 
 
 def _tool_args(tc, i: int) -> dict:
@@ -224,8 +249,12 @@ class Agent:
     # ── Stream chat (web) ─────────────────────────────────────────────────────
 
     def stream_chat(self, user_message: str, attachments=None):
+        import workspace as ws
         msg = self._build_user_message(user_message, attachments or [])
         self.history.append(msg)
+
+        auto_retries = 0
+        MAX_AUTO_RETRIES = 3
 
         while True:
             stream = ollama.chat(
@@ -247,6 +276,25 @@ class Agent:
 
             if not tool_calls:
                 self.history.append({"role": "assistant", "content": content})
+
+                # Workspace actif + code affiché sans tool call = on force l'application
+                if (ws.get_workspace()
+                        and _has_code_block(content)
+                        and not _already_applied(self.history)
+                        and auto_retries < MAX_AUTO_RETRIES):
+                    auto_retries += 1
+                    correction = (
+                        "STOP. Tu as écrit du code dans ta réponse sans modifier aucun fichier. "
+                        "C'est incorrect. Tu dois maintenant appliquer ces changements immédiatement "
+                        "en appelant les outils : "
+                        "1) read_file pour lire le fichier cible "
+                        "2) patch_file pour appliquer la modification (ou create_file si c'est un nouveau fichier). "
+                        "Appelle les outils maintenant. Ne génère pas de texte avant d'avoir utilisé les outils."
+                    )
+                    yield {"type": "token", "content": f"\n\n> ⚙️ Application automatique…\n\n"}
+                    self.history.append({"role": "user", "content": correction})
+                    continue
+
                 self._save()
                 yield {"type": "conv_meta", "conv": self.current_conv}
                 return

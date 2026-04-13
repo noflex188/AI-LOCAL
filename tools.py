@@ -46,11 +46,72 @@ def patch_file(path: str, old: str, new: str) -> str:
     with open(path, "r", encoding="utf-8") as f:
         content = f.read()
     if old not in content:
-        return f"Error: the text to replace was not found in {path}. Use read_file to check the exact content first."
+        # Tentative de correspondance flexible (ignore les différences d'indentation)
+        import re
+        old_stripped = re.sub(r'[ \t]+', ' ', old.strip())
+        for line in content.splitlines():
+            pass  # just to check structure
+        # Chercher ligne par ligne avec strip pour donner un contexte utile
+        old_lines = [l.strip() for l in old.splitlines() if l.strip()]
+        content_lines = [l.strip() for l in content.splitlines()]
+        matches = [i for i, l in enumerate(content_lines) if old_lines and l == old_lines[0]]
+        hint = ""
+        if matches:
+            hint = f" (ligne ~{matches[0]+1} possible, vérifier l'indentation exacte)"
+        return (
+            f"Error: text to replace not found in {path}{hint}. "
+            f"Call read_file('{path}') first to get the exact text including indentation and spacing."
+        )
     updated = content.replace(old, new, 1)
     with open(path, "w", encoding="utf-8") as f:
         f.write(updated)
     return f"Patched: {path}"
+
+
+def patch_file_lines(path: str, start_line: int, end_line: int, new_content: str) -> str:
+    """Replace lines start_line to end_line (1-indexed, inclusive) with new_content."""
+    if not os.path.exists(path):
+        return f"Error: file not found: {path}"
+    with open(path, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+    total = len(lines)
+    if start_line < 1 or end_line > total or start_line > end_line:
+        return f"Error: invalid line range {start_line}-{end_line} (file has {total} lines)."
+    new_lines = new_content if new_content.endswith("\n") else new_content + "\n"
+    lines[start_line - 1:end_line] = [new_lines]
+    with open(path, "w", encoding="utf-8") as f:
+        f.writelines(lines)
+    return f"Patched lines {start_line}-{end_line} in {path}"
+
+
+def grep_files(pattern: str, path: str = ".", file_glob: str = "*") -> str:
+    """Search for a pattern in files. Returns matching lines with file:line context."""
+    import re, fnmatch
+    from pathlib import Path
+    results = []
+    search_path = Path(path)
+    if not search_path.exists():
+        return f"Error: path not found: {path}"
+    try:
+        rx = re.compile(pattern, re.IGNORECASE)
+    except re.error as e:
+        return f"Invalid regex: {e}"
+    skip_dirs = {'.git', '__pycache__', 'node_modules', 'venv', '.venv', 'dist', 'build'}
+    for f in search_path.rglob(file_glob):
+        if any(p in f.parts for p in skip_dirs):
+            continue
+        if not f.is_file():
+            continue
+        try:
+            for i, line in enumerate(f.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+                if rx.search(line):
+                    results.append(f"{f}:{i}: {line.rstrip()}")
+                    if len(results) >= 50:
+                        results.append("... (truncated at 50 results)")
+                        return "\n".join(results)
+        except Exception:
+            continue
+    return "\n".join(results) if results else "No matches found."
 
 
 def delete_file(path: str) -> str:
@@ -175,17 +236,19 @@ def search_project(query: str) -> str:
 # ── Registry ──────────────────────────────────────────────────────────────────
 
 TOOL_FUNCTIONS = {
-    "create_file":    create_file,
-    "read_file":      read_file,
-    "patch_file":     patch_file,
-    "list_dir":       list_dir,
-    "delete_file":    delete_file,
-    "run_command":    run_command,
-    "get_datetime":   get_datetime,
-    "web_search":     web_search,
-    "fetch_url":      fetch_url,
-    "save_memory":    save_memory,
-    "search_project": search_project,
+    "create_file":      create_file,
+    "read_file":        read_file,
+    "patch_file":       patch_file,
+    "patch_file_lines": patch_file_lines,
+    "grep_files":       grep_files,
+    "list_dir":         list_dir,
+    "delete_file":      delete_file,
+    "run_command":      run_command,
+    "get_datetime":     get_datetime,
+    "web_search":       web_search,
+    "fetch_url":        fetch_url,
+    "save_memory":      save_memory,
+    "search_project":   search_project,
 }
 
 TOOL_SCHEMAS = [
@@ -363,6 +426,47 @@ TOOL_SCHEMAS = [
                     "url": {"type": "string", "description": "Full URL to fetch, e.g. 'https://docs.python.org/...'"},
                 },
                 "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "patch_file_lines",
+            "description": (
+                "Replace a range of lines in a file with new content. "
+                "Use this as an alternative to patch_file when you know the line numbers. "
+                "First use read_file to see line numbers, then replace the exact range."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path":        {"type": "string",  "description": "Path of the file to edit"},
+                    "start_line":  {"type": "integer", "description": "First line to replace (1-indexed)"},
+                    "end_line":    {"type": "integer", "description": "Last line to replace (1-indexed, inclusive)"},
+                    "new_content": {"type": "string",  "description": "New content to put in place of those lines"},
+                },
+                "required": ["path", "start_line", "end_line", "new_content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "grep_files",
+            "description": (
+                "Search for a text pattern (regex) across files in a directory. "
+                "Returns matching lines with file path and line number. "
+                "Use this to find where a function is defined, where a variable is used, etc."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern":   {"type": "string", "description": "Regex or text to search for, e.g. 'def login' or 'import os'"},
+                    "path":      {"type": "string", "description": "Directory to search in (default '.')"},
+                    "file_glob": {"type": "string", "description": "File filter glob, e.g. '*.py', '*.js' (default '*')"},
+                },
+                "required": ["pattern"],
             },
         },
     },
