@@ -1806,8 +1806,25 @@ function renderProjConvList(convs) {
     const item = document.createElement('div');
     item.className = 'conv-item' + (c.id === currentConvId ? ' active' : '');
     item.dataset.id = c.id;
-    item.innerHTML = `<span class="conv-icon">💬</span><span class="conv-title">${escHtml(c.title)}</span>`;
-    item.addEventListener('click', () => switchConversation(c.id));
+    item.innerHTML = `
+      <span class="conv-icon">💬</span>
+      <span class="conv-title">${escHtml(c.title)}</span>
+      <button class="conv-delete" title="Supprimer">×</button>`;
+    item.addEventListener('click', e => {
+      if (e.target.classList.contains('conv-delete')) return;
+      switchConversation(c.id);
+    });
+    item.querySelector('.conv-delete').addEventListener('click', async e => {
+      e.stopPropagation();
+      if (!confirm('Supprimer cette conversation ?')) return;
+      const data = await fetch(`/conversations/${c.id}`, { method: 'DELETE' }).then(r => r.json());
+      currentConvId = data.current_conv?.id || null;
+      // Rafraîchir la liste du projet
+      const status = await fetch('/workspace/status').then(r => r.json());
+      renderProjConvList(status.convs || []);
+      setActiveConv(currentConvId);
+      renderMessages(data.messages || [], data.current_conv);
+    });
     el.appendChild(item);
   });
 }
