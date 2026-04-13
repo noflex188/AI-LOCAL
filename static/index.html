@@ -2374,6 +2374,11 @@ function setGenerating(v) {
   isGenerating = v;
   $btnSend.disabled = v || !$input.value.trim();
   $btnSend.style.display = v ? 'none' : '';
+  if (v) {
+    // Réinitialiser le bouton stop à chaque génération
+    $btnStop.disabled = false;
+    $btnStop.innerHTML = '<span class="stop-sq"></span>Arrêter';
+  }
   $btnStop.style.display = v ? 'flex' : 'none';
   $status.className = v ? 'busy' : '';
   $input.disabled = v;
