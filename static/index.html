@@ -227,7 +227,7 @@ body { font-family:var(--font); background:var(--bg); color:var(--text); font-si
   transition:all .18s;
 }
 #model-btn:hover, #notes-model-btn:hover { border-color:var(--accent); color:var(--text); }
-#model-btn.open, #notes-model-btn.open  { border-color:var(--accent); background:var(--surface2); }
+#model-btn.open, #notes-model-btn.open { border-color:var(--accent); background:var(--surface2); }
 #model-dot, #notes-model-dot { width:6px; height:6px; border-radius:50%; background:var(--success); flex-shrink:0; }
 #model-chevron, #notes-model-chevron { font-size:9px; color:var(--text-3); transition:transform .2s; }
 #model-btn.open #model-chevron, #notes-model-btn.open #notes-model-chevron { transform:rotate(180deg); }
@@ -241,6 +241,11 @@ body { font-family:var(--font); background:var(--bg); color:var(--text); font-si
 }
 #model-dropdown.open, #notes-model-dropdown.open { display:block; }
 #notes-model-selector { position:relative; }
+.model-code-badge {
+  font-size:9px; padding:1px 5px; border-radius:3px;
+  background:var(--accent-dim); color:var(--accent-h);
+  border:1px solid var(--accent); margin-left:auto; flex-shrink:0;
+}
 .model-option {
   display:flex; align-items:center; gap:8px; padding:9px 12px;
   cursor:pointer; transition:background .15s; border-radius:var(--r-sm);
@@ -435,6 +440,27 @@ body { font-family:var(--font); background:var(--bg); color:var(--text); font-si
 }
 #btn-send:hover:not(:disabled) { background:var(--accent-h); transform:scale(1.05); }
 #btn-send:disabled { background:var(--surface3); cursor:not-allowed; color:var(--text-3); }
+#btn-stop {
+  display:flex; align-items:center; gap:6px;
+  padding:0 14px; height:34px; border-radius:8px; flex-shrink:0;
+  background:transparent; border:1.5px solid var(--error,#e05555);
+  color:var(--error,#e05555); cursor:pointer; font-size:12px;
+  font-family:var(--font); font-weight:500; letter-spacing:.01em;
+  transition:all .18s;
+}
+#btn-stop:hover:not(:disabled) { background:var(--error,#e05555); color:#fff; }
+#btn-stop:disabled { border-color:var(--border2); color:var(--text-3); cursor:not-allowed; }
+#btn-stop .stop-sq {
+  width:9px; height:9px; border-radius:2px;
+  background:currentColor; flex-shrink:0;
+}
+.stop-spinner {
+  width:11px; height:11px; border-radius:50%; flex-shrink:0;
+  border:2px solid var(--text-3);
+  border-top-color:transparent;
+  animation:spin .6s linear infinite;
+}
+@keyframes spin { to { transform:rotate(360deg); } }
 #input-hint { text-align:center; font-size:11px; color:var(--text-3); margin-top:6px; max-width:740px; margin-left:auto; margin-right:auto; }
 
 /* ── Memory panel ── */
@@ -1048,6 +1074,9 @@ body { font-family:var(--font); background:var(--bg); color:var(--text); font-si
           <line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/>
         </svg>
       </button>
+      <button id="btn-stop" style="display:none">
+        <span class="stop-sq"></span>Arrêter
+      </button>
     </div>
     <div id="input-hint">Entrée pour envoyer · Maj+Entrée pour nouvelle ligne</div>
   </footer>
@@ -1121,6 +1150,7 @@ let pendingFiles  = [];   // [{name, kind, content, size}]
 const $messages    = document.getElementById('messages');
 const $input       = document.getElementById('input');
 const $btnSend     = document.getElementById('btn-send');
+const $btnStop     = document.getElementById('btn-stop');
 const $status      = document.getElementById('status');
 const $convList    = document.getElementById('conv-list');
 const $convHeader  = document.getElementById('conv-title-header');
@@ -1132,7 +1162,8 @@ const $anchor      = document.getElementById('anchor');
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 async function init() {
-  loadContext();          // affiche la barre de contexte ET lit le modèle actif
+  loadContext();
+  loadModels();           // pré-rempli les dropdowns modèles dès le départ
   await loadConversations();
   await loadCurrentHistory();
   loadWorkspaceStatus();
@@ -1191,7 +1222,7 @@ async function loadContext() {
 // ── Conversations sidebar ─────────────────────────────────────────────────────
 async function loadConversations() {
   const convs = await fetch('/conversations').then(r => r.json());
-  renderConvList(convs);
+  renderConvList(convs.filter(c => !c.workspace));
 }
 
 function renderConvList(convs) {
@@ -1694,12 +1725,20 @@ let wsActive = false;
 async function loadWorkspaceStatus() {
   try {
     const s = await fetch('/workspace/status').then(r => r.json());
-    if (s.active) applyWorkspaceInfo(s);
+    if (s.active) {
+      applyWorkspaceInfo(s);
+      if (s.conv) {
+        currentConvId = s.conv.id;
+        setActiveConv(s.conv.id);
+        renderMessages(s.messages || [], s.conv);
+      }
+    }
   } catch {}
 }
 
 function applyWorkspaceInfo(info) {
   wsActive = true;
+  loadModels(); // affiche les modèles code dans le sélecteur
   document.getElementById('ws-closed').style.display = 'none';
   document.getElementById('ws-open').classList.add('visible');
   document.getElementById('ws-name').textContent = info.name;
@@ -1712,7 +1751,7 @@ function applyWorkspaceInfo(info) {
     badge.textContent = 'Non indexé — clic ⚡ pour indexer';
     badge.className = '';
   }
-  renderProjConvList(info.conv ? [info.conv] : []);
+  renderProjConvList(info.convs || (info.conv ? [info.conv] : []));
   loadFileTree();
   document.getElementById('act-proj').click();
 }
@@ -1742,6 +1781,8 @@ async function browseWorkspace() {
 
 document.getElementById('btn-ws-close').addEventListener('click', () => {
   wsActive = false;
+  loadModels(); // retire les modèles code du sélecteur
+  fetch('/workspace/close', { method: 'POST' }).catch(() => {});
   document.getElementById('ws-open').classList.remove('visible');
   document.getElementById('ws-closed').style.display = '';
   document.getElementById('file-tree').innerHTML = '';
@@ -2169,9 +2210,10 @@ async function loadModels() {
   } catch {}
 }
 
-function _fillModelDropdown(models, dropdown) {
+function _fillModelDropdown(models, dropdown, includeCodeOnly = false) {
   dropdown.innerHTML = '';
-  models.forEach(m => {
+  const filtered = includeCodeOnly ? models : models.filter(m => !m.code_only);
+  filtered.forEach(m => {
     const opt = document.createElement('div');
     opt.className = 'model-option' + (m.id === currentModel ? ' active' : '');
     opt.dataset.id = m.id;
@@ -2179,10 +2221,9 @@ function _fillModelDropdown(models, dropdown) {
       <span class="model-status ${m.installed ? 'ok' : 'nok'}"></span>
       <span class="model-name">${escHtml(m.id)}</span>
       ${m.id === currentModel ? '<span class="model-tag">actif</span>' : ''}
+      ${m.code_only ? '<span class="model-code-badge">code</span>' : ''}
       ${!m.installed ? `<button class="btn-pull" data-model="${escHtml(m.id)}">⬇ Installer</button>` : ''}`;
-    if (m.installed) {
-      opt.addEventListener('click', () => selectModel(m.id));
-    }
+    if (m.installed) opt.addEventListener('click', () => selectModel(m.id));
     const pullBtn = opt.querySelector('.btn-pull');
     if (pullBtn) {
       pullBtn.addEventListener('click', e => {
@@ -2197,8 +2238,9 @@ function _fillModelDropdown(models, dropdown) {
 }
 
 function renderModelDropdown(models) {
-  _fillModelDropdown(models, document.getElementById('model-dropdown'));
-  _fillModelDropdown(models, document.getElementById('notes-model-dropdown'));
+  // Sélecteur principal : modèles code visibles si workspace actif
+  _fillModelDropdown(models, document.getElementById('model-dropdown'), wsActive);
+  _fillModelDropdown(models, document.getElementById('notes-model-dropdown'), false);
   if (currentModel) {
     document.getElementById('model-name-label').textContent = currentModel;
     document.getElementById('model-dot').style.background = 'var(--success)';
@@ -2215,25 +2257,19 @@ function closeNotesModelDropdown() { document.getElementById('notes-model-btn').
 document.getElementById('model-btn').addEventListener('click', e => {
   e.stopPropagation();
   const isOpen = document.getElementById('model-dropdown').classList.contains('open');
-  if (isOpen) { closeModelDropdown(); }
-  else { closeNotesModelDropdown(); openModelDropdown(); loadModels(); }
+  if (isOpen) { closeModelDropdown(); } else { closeNotesModelDropdown(); openModelDropdown(); loadModels(); }
 });
 document.getElementById('notes-model-btn').addEventListener('click', e => {
   e.stopPropagation();
   const isOpen = document.getElementById('notes-model-dropdown').classList.contains('open');
-  if (isOpen) { closeNotesModelDropdown(); }
-  else { closeModelDropdown(); openNotesModelDropdown(); loadModels(); }
+  if (isOpen) { closeNotesModelDropdown(); } else { closeModelDropdown(); openNotesModelDropdown(); loadModels(); }
 });
 document.addEventListener('click', () => { closeModelDropdown(); closeNotesModelDropdown(); });
 
 async function selectModel(id) {
-  closeModelDropdown();
-  closeNotesModelDropdown();
+  closeModelDropdown(); closeNotesModelDropdown();
   if (id === currentModel) return;
-  await fetch('/models/select', {
-    method: 'POST', headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({ model: id }),
-  });
+  await fetch('/models/select', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ model: id }) });
   currentModel = id;
   await loadModels();
 }
@@ -2300,6 +2336,8 @@ function escHtml(s) {
 function addCopyButtons(el) {
   el.querySelectorAll('pre').forEach(pre => {
     if (pre.querySelector('.copy-btn')) return;
+
+    // Bouton Copier
     const btn = document.createElement('button');
     btn.className = 'copy-btn'; btn.textContent = 'Copier';
     btn.addEventListener('click', () => {
@@ -2309,6 +2347,7 @@ function addCopyButtons(el) {
     });
     pre.style.position = 'relative';
     pre.appendChild(btn);
+
   });
 }
 function scrollToBottom(smooth = true) {
@@ -2317,9 +2356,18 @@ function scrollToBottom(smooth = true) {
 function setGenerating(v) {
   isGenerating = v;
   $btnSend.disabled = v || !$input.value.trim();
+  $btnSend.style.display = v ? 'none' : '';
+  $btnStop.style.display = v ? 'flex' : 'none';
   $status.className = v ? 'busy' : '';
   $input.disabled = v;
 }
+
+$btnStop.addEventListener('click', async () => {
+  $btnStop.disabled = true;
+  $btnStop.querySelector('.stop-sq').style.display = 'none';
+  $btnStop.innerHTML = '<span class="stop-spinner"></span>Arrêt…';
+  await fetch('/chat/stop', { method: 'POST' });
+});
 function showTyping(v) {
   const existing = document.getElementById('typing-bubble');
   if (v && !existing) {
