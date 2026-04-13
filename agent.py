@@ -9,7 +9,7 @@ from confirmation import confirm_manager, SENSITIVE_TOOLS
 colorama_init(autoreset=True)
 
 MODEL           = "gemma4:26b"
-PREFERRED_MODELS = ["gemma4:26b", "gemma4:e4b"]
+PREFERRED_MODELS = ["gemma4:26b", "qwen2.5-coder:32b", "qwen2.5-coder:14b", "qwen2.5-coder:7b", "gemma4:e4b"]
 MAX_HISTORY      = 40
 
 
@@ -61,25 +61,40 @@ SYSTEM_PROMPT_BASE = """Tu es un assistant IA personnel, intelligent, direct et 
 - **save_memory** : utilise-le dès que l'utilisateur mentionne son prénom, une préférence, un projet en cours. Fais-le naturellement sans le demander.
 - Tu peux enchaîner plusieurs outils dans le même tour si nécessaire.
 
-## Tu es un agent de développement — pas un assistant qui explique
+## Tu es un agent de développement — MODE AGENT ACTIF
 
-Quand un workspace est ouvert, tu es en MODE AGENT. Ton rôle est d'AGIR sur les fichiers, pas de montrer du code.
+Quand un workspace est ouvert, tu AGIS sur les fichiers. Tu n'es pas un chatbot qui montre du code.
 
-**Afficher un bloc ```code``` dans ta réponse = INTERDIT si un fichier doit être modifié.**
+### RÈGLE ABSOLUE
+**Ne jamais écrire de code dans ta réponse.** À la place, appelle immédiatement les outils.
 
-À la place, tu fais toujours :
-1. `read_file` sur le fichier à modifier (pour voir le contenu et les numéros de ligne)
-2. `patch_file_lines` pour remplacer les lignes concernées (préféré car plus fiable que patch_file)
-   — ou `patch_file` si le bloc de texte est court et sans ambiguïté
-3. Tu dis à l'utilisateur ce que tu as fait (pas ce qu'il doit faire)
+### EXEMPLES DE CE QUI EST ATTENDU
 
-Pour trouver un fichier ou une fonction : `grep_files` puis `read_file`.
-Pour un nouveau fichier : `create_file` directement (les dossiers sont créés automatiquement).
-Pour une erreur/traceback : `read_file` → `patch_file_lines` → `run_command` pour vérifier.
+❌ MAUVAIS — ne jamais faire ça :
+> Voici un script PowerShell :
+> ```powershell
+> Get-ChildItem -Recurse | ...
+> ```
 
-Tu peux créer une arborescence complète (`src/`, `components/`, `tests/`, etc.) si le projet le demande.
+✅ CORRECT — toujours faire ça :
+> [appel create_file("find_duplicates.ps1", "Get-ChildItem -Recurse | ...")]
+> Fait : j'ai créé `find_duplicates.ps1` dans le workspace.
 
-**Seul cas où tu peux afficher du code dans ta réponse :** l'utilisateur te demande explicitement une explication ou un exemple sans vouloir modifier un fichier.
+❌ MAUVAIS — ne jamais faire ça :
+> Modifie la ligne 42 par : `return x * 2`
+
+✅ CORRECT — toujours faire ça :
+> [appel read_file("app.py")] → [appel patch_file_lines("app.py", 42, 42, "    return x * 2")]
+> Fait : ligne 42 mise à jour dans `app.py`.
+
+### Workflow pour chaque type de tâche
+
+**Créer un fichier** → `create_file(path, content)` — choisit un nom approprié, crée les dossiers si besoin
+**Modifier un fichier** → `read_file` pour voir les lignes → `patch_file_lines` pour modifier
+**Chercher dans le code** → `grep_files(pattern)` → `read_file` pour lire le contexte
+**Exécuter** → `run_command` après avoir créé/modifié
+
+**Seule exception :** si l'utilisateur dit explicitement "montre-moi", "explique-moi" ou "donne-moi un exemple" sans vouloir un fichier.
 
 ## Avant d'agir : clarifier si nécessaire
 Si une demande manque de contexte (objectif flou, stack non précisée, etc.), **pose d'abord des questions ciblées**.
@@ -88,9 +103,9 @@ Si une demande manque de contexte (objectif flou, stack non précisée, etc.), *
 - Pour les tâches simples et sans ambiguïté, agis directement.
 
 ## Format des réponses
-- Pour du code, utilise toujours des blocs markdown avec le langage (```python, ```bash, etc.).
 - Pour des listes de choix ou comparatifs, utilise un tableau ou des puces claires.
 - Évite les introductions inutiles du type "Bien sûr !" ou "Absolument !".
+- En mode agent (workspace ouvert) : ne mets JAMAIS de code dans ta réponse — écris-le dans les fichiers via les outils.
 """
 
 
@@ -117,6 +132,89 @@ def _has_code_block(text: str) -> bool:
     """Détecte si la réponse contient un bloc de code (``` ... ```)."""
     import re
     return bool(re.search(r"```[\w]*\n[\s\S]+?```", text))
+
+
+def _extract_code_blocks(text: str) -> list[dict]:
+    """Extrait les blocs de code avec leur langage."""
+    import re
+    blocks = []
+    for m in re.finditer(r"```([\w]*)\n([\s\S]+?)```", text):
+        lang = m.group(1).strip()
+        code = m.group(2)
+        blocks.append({"lang": lang, "code": code})
+    return blocks
+
+
+_LANG_EXT = {
+    "python":"py","javascript":"js","typescript":"ts","powershell":"ps1",
+    "bash":"sh","shell":"sh","html":"html","css":"css","json":"json",
+    "sql":"sql","rust":"rs","go":"go","java":"java","cpp":"cpp","c":"c",
+    "yaml":"yml","toml":"toml","xml":"xml","php":"php","ruby":"rb","swift":"swift",
+}
+
+def _guess_filename(history: list, lang: str, index: int = 0) -> str:
+    """Tente de trouver un nom de fichier dans l'historique récent, sinon en génère un."""
+    import re
+    ext = _LANG_EXT.get(lang.lower(), lang or "txt")
+    # Cherche un nom de fichier explicite dans les derniers messages
+    for msg in reversed(history[-6:]):
+        content = msg.get("content", "")
+        if not isinstance(content, str):
+            continue
+        # Pattern : quelque chose.ext
+        matches = re.findall(r'\b([\w\-]+\.' + re.escape(ext) + r')\b', content, re.IGNORECASE)
+        if matches:
+            return matches[0]
+        # Pattern : nom entre backticks
+        matches = re.findall(r'`([\w\-/]+\.' + re.escape(ext) + r')`', content, re.IGNORECASE)
+        if matches:
+            return matches[0]
+    suffix = f"_{index+1}" if index > 0 else ""
+    return f"script{suffix}.{ext}"
+
+
+def _looks_like_tool_call(code: str) -> bool:
+    """Vérifie si une chaîne est un appel d'outil JSON {"name": ..., "arguments": ...}."""
+    try:
+        parsed = json.loads(code.strip())
+        return isinstance(parsed, dict) and "name" in parsed and "arguments" in parsed
+    except Exception:
+        return False
+
+
+def _extract_fake_tool_calls(text: str) -> list[dict]:
+    """
+    Extrait les appels d'outils JSON écrits en texte libre (hors blocs de code).
+    Retourne une liste de dicts {"name": ..., "args": ...}.
+    """
+    import re
+    results = []
+    seen_starts = set()
+    for m in re.finditer(r'"name"\s*:\s*"([^"]+)"', text):
+        start = text.rfind('{', 0, m.start())
+        if start == -1 or start in seen_starts:
+            continue
+        seen_starts.add(start)
+        depth, end = 0, start
+        for idx, ch in enumerate(text[start:], start):
+            if ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0:
+                    end = idx + 1
+                    break
+        if end > start:
+            try:
+                parsed = json.loads(text[start:end])
+                if isinstance(parsed, dict) and "name" in parsed and "arguments" in parsed:
+                    results.append({
+                        "name": parsed["name"],
+                        "args": parsed["arguments"] if isinstance(parsed["arguments"], dict) else {},
+                    })
+            except Exception:
+                pass
+    return results
 
 
 def _already_applied(history: list) -> bool:
@@ -255,8 +353,17 @@ class Agent:
 
         auto_retries = 0
         MAX_AUTO_RETRIES = 3
+        loop_iterations = 0
+        MAX_ITERATIONS = 12
+        read_counts: dict[str, int] = {}   # chemin → nombre de read_file consécutifs
 
         while True:
+            loop_iterations += 1
+            if loop_iterations > MAX_ITERATIONS:
+                yield {"type": "token", "content": "\n\n⚠️ Limite d'itérations atteinte — arrêt automatique.\n"}
+                self._save()
+                yield {"type": "conv_meta", "conv": self.current_conv}
+                return
             stream = ollama.chat(
                 model    = self.model,
                 messages = self._trimmed_history(),
@@ -277,23 +384,76 @@ class Agent:
             if not tool_calls:
                 self.history.append({"role": "assistant", "content": content})
 
-                # Workspace actif + code affiché sans tool call = on force l'application
-                if (ws.get_workspace()
-                        and _has_code_block(content)
-                        and not _already_applied(self.history)
-                        and auto_retries < MAX_AUTO_RETRIES):
-                    auto_retries += 1
-                    correction = (
-                        "STOP. Tu as écrit du code dans ta réponse sans modifier aucun fichier. "
-                        "C'est incorrect. Tu dois maintenant appliquer ces changements immédiatement "
-                        "en appelant les outils : "
-                        "1) read_file pour lire le fichier cible "
-                        "2) patch_file pour appliquer la modification (ou create_file si c'est un nouveau fichier). "
-                        "Appelle les outils maintenant. Ne génère pas de texte avant d'avoir utilisé les outils."
-                    )
-                    yield {"type": "token", "content": f"\n\n> ⚙️ Application automatique…\n\n"}
-                    self.history.append({"role": "user", "content": correction})
-                    continue
+                # Workspace actif + pas de vrai tool call = tenter de forcer l'exécution
+                if ws.get_workspace() and not _already_applied(self.history):
+
+                    # ── Étape 1 : détecter des appels d'outils écrits en JSON dans le texte ──
+                    blocks = _extract_code_blocks(content) if _has_code_block(content) else []
+
+                    # Séparer les blocs JSON (faux tool calls) des vrais blocs de code
+                    fake_calls: list[dict] = []
+                    regular_blocks: list[dict] = []
+                    for b in blocks:
+                        if b["lang"].lower() in ("json", "") and _looks_like_tool_call(b["code"]):
+                            try:
+                                parsed = json.loads(b["code"].strip())
+                                fake_calls.append({
+                                    "name": parsed["name"],
+                                    "args": parsed["arguments"] if isinstance(parsed["arguments"], dict) else {},
+                                })
+                            except Exception:
+                                regular_blocks.append(b)
+                        else:
+                            regular_blocks.append(b)
+
+                    # Chercher aussi des JSON tool calls en texte libre (hors blocs)
+                    fake_calls += _extract_fake_tool_calls(content)
+
+                    if fake_calls:
+                        # Exécuter directement les faux tool calls détectés
+                        yield {"type": "token", "content": "\n\n> ⚙️ Exécution des actions détectées…\n\n"}
+                        created = []
+                        for i, fc in enumerate(fake_calls):
+                            yield {"type": "tool_start", "name": fc["name"], "args": fc["args"]}
+                            try:
+                                result = call_tool(fc["name"], fc["args"])
+                            except Exception as e:
+                                result = f"Erreur : {e}"
+                            self.history.append({"role": "tool", "tool_call_id": f"fake_{i}", "content": result})
+                            yield {"type": "tool_end", "name": fc["name"], "result": result}
+                            if "path" in fc["args"]:
+                                created.append(fc["args"]["path"])
+                        if created:
+                            names = ", ".join(f"`{n}`" for n in created)
+                            yield {"type": "token", "content": f"\n\n📝 Fichier(s) créé(s) : {names}\n"}
+
+                    elif regular_blocks:
+                        if auto_retries == 0:
+                            # 1ère tentative : demander au modèle d'utiliser les outils
+                            auto_retries += 1
+                            blocks_desc = ""
+                            for i, b in enumerate(regular_blocks):
+                                name = _guess_filename(self.history, b["lang"], i)
+                                blocks_desc += f"\nBloc {i+1} → créer `{name}` :\n```\n{b['code'][:400]}{'...' if len(b['code'])>400 else ''}\n```\n"
+                            correction = (
+                                f"Tu as affiché du code sans créer de fichier. "
+                                f"Appelle create_file maintenant pour chaque bloc ci-dessous. "
+                                f"Ne génère pas de texte, utilise les outils directement.{blocks_desc}"
+                            )
+                            yield {"type": "token", "content": "\n\n> ⚙️ Création du fichier…\n\n"}
+                            self.history.append({"role": "user", "content": correction})
+                            continue
+                        else:
+                            # Le modèle persiste → on force en Python
+                            created = []
+                            for i, b in enumerate(regular_blocks):
+                                filename = _guess_filename(self.history, b["lang"], i)
+                                result = call_tool("create_file", {"path": filename, "content": b["code"]})
+                                created.append(filename)
+                                self.history.append({"role": "tool", "tool_call_id": f"force_{i}", "content": result})
+                                yield {"type": "tool_end", "name": "create_file", "result": result}
+                            names = ", ".join(f"`{n}`" for n in created)
+                            yield {"type": "token", "content": f"\n\n📝 Fichier(s) créé(s) automatiquement : {names}\n"}
 
                 self._save()
                 yield {"type": "conv_meta", "conv": self.current_conv}
@@ -340,6 +500,56 @@ class Agent:
                     result = call_tool(name, args)
                     if name == "save_memory":
                         self.history[0]["content"] = _build_system_prompt()
+
+                    # Détection de boucle read_file : même fichier lu 2x sans modification
+                    if name == "read_file":
+                        fpath = args.get("path", "")
+                        read_counts[fpath] = read_counts.get(fpath, 0) + 1
+                        if read_counts[fpath] >= 2:
+                            # Le modèle boucle → on prend le relais
+                            # On demande au modèle de générer le fichier complet modifié
+                            yield {"type": "tool_end", "name": name, "result": result[:600]}
+                            self.history.append({"role": "tool", "tool_call_id": call_id, "content": result})
+
+                            # Récupérer la dernière demande utilisateur
+                            user_req = next(
+                                (m["content"] for m in reversed(self.history)
+                                 if m.get("role") == "user" and isinstance(m.get("content"), str)
+                                 and "STOP" not in m["content"] and "bloc" not in m["content"]),
+                                "appliquer les modifications demandées"
+                            )
+                            # Lire le contenu actuel
+                            with open(fpath, "r", encoding="utf-8") as _f:
+                                current = _f.read()
+
+                            yield {"type": "token", "content": "\n\n> ⚙️ Application directe des modifications…\n\n"}
+
+                            # Appel ciblé : génère uniquement le contenu du fichier
+                            resp = ollama.chat(
+                                model=self.model,
+                                messages=[
+                                    {"role": "system", "content": "Tu es un expert en code. Réponds UNIQUEMENT avec le contenu du fichier demandé, sans explication, sans balises markdown, sans ```"},
+                                    {"role": "user", "content": f"Voici le contenu actuel de `{fpath}` :\n\n{current}\n\nModification demandée : {user_req}\n\nÉcris le fichier complet avec la modification appliquée. Réponds uniquement avec le contenu du fichier, rien d'autre."},
+                                ],
+                                stream=False,
+                            )
+                            new_content = resp.message.content.strip()
+                            # Nettoyer les éventuelles balises markdown résiduelles
+                            import re as _re
+                            new_content = _re.sub(r'^```[\w]*\n?', '', new_content)
+                            new_content = _re.sub(r'\n?```$', '', new_content)
+
+                            write_result = call_tool("create_file", {"path": fpath, "content": new_content})
+                            yield {"type": "tool_start", "name": "create_file", "args": {"path": fpath}}
+                            yield {"type": "tool_end", "name": "create_file", "result": write_result}
+                            self.history.append({"role": "assistant", "content": f"Fichier `{fpath}` mis à jour."})
+                            self._save()
+                            yield {"type": "conv_meta", "conv": self.current_conv}
+                            return
+
+                    elif name in ("patch_file", "patch_file_lines", "create_file"):
+                        read_counts.clear()   # reset après une modification
+
                     yield {"type": "tool_end", "name": name, "result": result[:600]}
                 except Exception as e:
                     result = f"Tool error: {e}"
