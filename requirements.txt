@@ -1,0 +1,5 @@
+ollama>=0.3.0
+ddgs>=0.1.0
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+colorama>=0.4.6
