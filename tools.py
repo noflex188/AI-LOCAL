@@ -26,7 +26,9 @@ def read_file(path: str) -> str:
     if not os.path.exists(path):
         return f"Error: file not found: {path}"
     with open(path, "r", encoding="utf-8") as f:
-        return f.read()
+        lines = f.readlines()
+    numbered = "".join(f"{i+1:4d} | {l}" for i, l in enumerate(lines))
+    return f"File: {path} ({len(lines)} lines)\n\n{numbered}"
 
 
 def list_dir(path: str = ".") -> str:
@@ -39,33 +41,74 @@ def list_dir(path: str = ".") -> str:
     return "\n".join(entries) if entries else "(empty)"
 
 
+def _smart_replace(content: str, old: str, new: str) -> tuple:
+    """
+    Remplace old par new dans content avec 3 niveaux de matching.
+    Retourne (nouveau_contenu, méthode) en cas de succès, ou (None, hint) en échec.
+    """
+    # ── Niveau 1 : correspondance exacte ──
+    if old in content:
+        return content.replace(old, new, 1), "exact"
+
+    old_lines = old.splitlines()
+    content_lines = content.splitlines()
+    trail_nl = content.endswith("\n")
+
+    def _rebuild(before, replacement, after):
+        r = "\n".join(before + replacement.splitlines() + after)
+        return r + "\n" if trail_nl else r
+
+    # ── Niveau 2 : correspondance avec normalisation des espaces ──
+    old_stripped = [l.strip() for l in old_lines]
+    for i in range(len(content_lines) - len(old_lines) + 1):
+        window = [l.strip() for l in content_lines[i:i + len(old_lines)]]
+        if window == old_stripped:
+            return _rebuild(content_lines[:i], new, content_lines[i + len(old_lines):]), "whitespace"
+
+    # ── Niveau 3 : correspondance floue (SequenceMatcher) ──
+    from difflib import SequenceMatcher
+    best_ratio, best_start, best_len = 0, -1, len(old_lines)
+    min_win = max(1, len(old_lines) - 3)
+    max_win = min(len(content_lines) + 1, len(old_lines) + 4)
+    for wlen in range(min_win, max_win):
+        for i in range(len(content_lines) - wlen + 1):
+            candidate = "\n".join(content_lines[i:i + wlen])
+            ratio = SequenceMatcher(None, old, candidate).ratio()
+            if ratio > best_ratio:
+                best_ratio, best_start, best_len = ratio, i, wlen
+
+    if best_ratio >= 0.6 and best_start >= 0:
+        return _rebuild(content_lines[:best_start], new, content_lines[best_start + best_len:]), f"fuzzy ({best_ratio:.0%})"
+
+    # ── Échec : fournir un indice utile ──
+    hint = ""
+    if best_start >= 0:
+        hint = f"Contenu le plus similaire à la ligne ~{best_start + 1} (similarité {best_ratio:.0%})"
+    else:
+        first_line = old_lines[0].strip() if old_lines else ""
+        candidates = [i + 1 for i, l in enumerate(content_lines) if l.strip() == first_line]
+        if candidates:
+            hint = f"La première ligne correspond aux lignes {candidates[:5]}, vérifier le contexte"
+    return None, hint
+
+
 def patch_file(path: str, old: str, new: str) -> str:
-    """Replace the first occurrence of `old` with `new` in a file."""
+    """Replace text in a file with smart matching (exact → whitespace → fuzzy)."""
     if not os.path.exists(path):
         return f"Error: file not found: {path}"
     with open(path, "r", encoding="utf-8") as f:
         content = f.read()
-    if old not in content:
-        # Tentative de correspondance flexible (ignore les différences d'indentation)
-        import re
-        old_stripped = re.sub(r'[ \t]+', ' ', old.strip())
-        for line in content.splitlines():
-            pass  # just to check structure
-        # Chercher ligne par ligne avec strip pour donner un contexte utile
-        old_lines = [l.strip() for l in old.splitlines() if l.strip()]
-        content_lines = [l.strip() for l in content.splitlines()]
-        matches = [i for i, l in enumerate(content_lines) if old_lines and l == old_lines[0]]
-        hint = ""
-        if matches:
-            hint = f" (ligne ~{matches[0]+1} possible, vérifier l'indentation exacte)"
-        return (
-            f"Error: text to replace not found in {path}{hint}. "
-            f"Call read_file('{path}') first to get the exact text including indentation and spacing."
-        )
-    updated = content.replace(old, new, 1)
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(updated)
-    return f"Patched: {path}"
+
+    result, info = _smart_replace(content, old, new)
+    if result is not None:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(result)
+        return f"Patched: {path}" + (f" ({info})" if info != "exact" else "")
+
+    return (
+        f"Error: text to replace not found in {path}. {info}. "
+        f"Call read_file('{path}') first to see the exact content."
+    )
 
 
 def patch_file_lines(path: str, start_line: int, end_line: int, new_content: str) -> str:

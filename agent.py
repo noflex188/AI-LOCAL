@@ -381,6 +381,7 @@ class Agent:
         loop_iterations = 0
         MAX_ITERATIONS = 12
         read_counts: dict[str, int] = {}   # chemin → nombre de read_file consécutifs
+        recently_read: list[str] = []      # fichiers lus dans cette session (pour auto-détection)
 
         while True:
             loop_iterations += 1
@@ -414,8 +415,8 @@ class Agent:
                     from actions import parse_actions, execute_actions
                     handled = False
 
-                    # ── Priorité 1 : actions texte (```lang:path, SEARCH/REPLACE) ──
-                    text_actions = parse_actions(content, ws.get_workspace())
+                    # ── Priorité 1 : actions texte (```lang:path, SEARCH/REPLACE, auto-détection) ──
+                    text_actions = parse_actions(content, ws.get_workspace(), recently_read)
                     if text_actions:
                         handled = True
                         yield {"type": "token", "content": "\n\n> ⚙️ Application des modifications…\n\n"}
@@ -470,11 +471,14 @@ class Agent:
                         elif regular_blocks:
                             if auto_retries == 0:
                                 auto_retries += 1
+                                files_hint = ""
+                                if recently_read:
+                                    files_hint = f" Fichiers récemment lus : {', '.join(recently_read[-3:])}."
                                 correction = (
                                     "Tu as affiché du code sans créer de fichier. "
-                                    "Utilise le format ```langage:chemin/fichier.ext pour créer un fichier, "
-                                    "ou le format SEARCH/REPLACE pour modifier un fichier existant. "
-                                    "Agis maintenant."
+                                    "Utilise le format ```langage:chemin/fichier.ext pour créer ou réécrire un fichier, "
+                                    "ou le format SEARCH/REPLACE pour modifier un fichier existant."
+                                    f"{files_hint} Agis maintenant."
                                 )
                                 yield {"type": "token", "content": "\n\n> ⚙️ Création du fichier…\n\n"}
                                 self.history.append({"role": "user", "content": correction})
@@ -541,9 +545,11 @@ class Agent:
                     if name == "save_memory":
                         self.history[0]["content"] = _build_system_prompt()
 
-                    # Détection de boucle read_file : même fichier lu 2x sans modification
+                    # Tracking des fichiers lus (pour auto-détection des modifications)
                     if name == "read_file":
                         fpath = args.get("path", "")
+                        if fpath not in recently_read:
+                            recently_read.append(fpath)
                         read_counts[fpath] = read_counts.get(fpath, 0) + 1
                         if read_counts[fpath] >= 2:
                             # Le modèle boucle → on prend le relais
