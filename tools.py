@@ -11,9 +11,40 @@ import memory as mem
 _VENV_BIN = os.path.dirname(sys.executable)
 
 
+# ── Path sandboxing ─────────────────────────────────────────────────────────
+
+def _safe_path(path: str) -> str:
+    """
+    Résout et valide un chemin fichier.
+    - Si un workspace est actif : les chemins relatifs y sont résolus,
+      les chemins absolus DOIVENT être à l'intérieur.
+    - Lève ValueError si le chemin est en dehors du workspace.
+    """
+    import workspace as ws
+    wpath = ws.get_workspace()
+
+    if wpath:
+        # Résoudre les chemins relatifs par rapport au workspace
+        if not os.path.isabs(path):
+            path = os.path.join(wpath, path)
+        # Normaliser pour éviter les traversées (../../)
+        path = os.path.normpath(os.path.abspath(path))
+        wpath_norm = os.path.normpath(os.path.abspath(wpath))
+        if not path.startswith(wpath_norm + os.sep) and path != wpath_norm:
+            raise ValueError(
+                f"Accès refusé : {path} est en dehors du workspace ({wpath_norm}). "
+                f"Utilise un chemin relatif au projet."
+            )
+    else:
+        path = os.path.normpath(os.path.abspath(path))
+
+    return path
+
+
 # ── File tools ───────────────────────────────────────────────────────────────
 
 def create_file(path: str, content: str) -> str:
+    path = _safe_path(path)
     dir_ = os.path.dirname(path)
     if dir_:
         os.makedirs(dir_, exist_ok=True)
@@ -23,6 +54,7 @@ def create_file(path: str, content: str) -> str:
 
 
 def read_file(path: str) -> str:
+    path = _safe_path(path)
     if not os.path.exists(path):
         return f"Error: file not found: {path}"
     with open(path, "r", encoding="utf-8") as f:
@@ -32,6 +64,7 @@ def read_file(path: str) -> str:
 
 
 def list_dir(path: str = ".") -> str:
+    path = _safe_path(path)
     if not os.path.exists(path):
         return f"Error: path not found: {path}"
     entries = []
@@ -94,6 +127,7 @@ def _smart_replace(content: str, old: str, new: str) -> tuple:
 
 def patch_file(path: str, old: str, new: str) -> str:
     """Replace text in a file with smart matching (exact → whitespace → fuzzy)."""
+    path = _safe_path(path)
     if not os.path.exists(path):
         return f"Error: file not found: {path}"
     with open(path, "r", encoding="utf-8") as f:
@@ -113,6 +147,7 @@ def patch_file(path: str, old: str, new: str) -> str:
 
 def patch_file_lines(path: str, start_line: int, end_line: int, new_content: str) -> str:
     """Replace lines start_line to end_line (1-indexed, inclusive) with new_content."""
+    path = _safe_path(path)
     if not os.path.exists(path):
         return f"Error: file not found: {path}"
     with open(path, "r", encoding="utf-8") as f:
@@ -129,6 +164,7 @@ def patch_file_lines(path: str, start_line: int, end_line: int, new_content: str
 
 def grep_files(pattern: str, path: str = ".", file_glob: str = "*") -> str:
     """Search for a pattern in files. Returns matching lines with file:line context."""
+    path = _safe_path(path)
     import re, fnmatch
     from pathlib import Path
     results = []
@@ -158,6 +194,7 @@ def grep_files(pattern: str, path: str = ".", file_glob: str = "*") -> str:
 
 
 def delete_file(path: str) -> str:
+    path = _safe_path(path)
     if not os.path.exists(path):
         return f"Error: file not found: {path}"
     os.remove(path)
@@ -175,6 +212,10 @@ def run_command(command: str) -> str:
         env["PATH"]        = _VENV_BIN + os.pathsep + env.get("PATH", "")
         env["VIRTUAL_ENV"] = os.path.dirname(_VENV_BIN)
 
+        # Exécuter dans le workspace si actif, sinon cwd
+        import workspace as ws
+        cwd = ws.get_workspace() or os.getcwd()
+
         result = subprocess.run(
             command,
             shell=True,
@@ -184,7 +225,7 @@ def run_command(command: str) -> str:
             encoding="utf-8",
             errors="replace",
             env=env,
-            cwd=os.getcwd(),
+            cwd=cwd,
         )
         output = ""
         if result.stdout:
