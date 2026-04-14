@@ -19,11 +19,31 @@ import rag
 import notes_store
 
 SUGGESTED_MODELS = ["gemma4:26b", "gemma4:e4b"]
+CODE_MODELS      = ["qwen2.5-coder:32b", "qwen2.5-coder:14b", "qwen2.5-coder:7b", "qwen2.5-coder:3b"]
 
 _BASE = os.path.dirname(os.path.abspath(__file__))
 
 app   = FastAPI()
 agent = Agent()
+_stop_event = threading.Event()
+
+
+@app.on_event("startup")
+def _restore_workspace():
+    """Restaure le workspace actif au redémarrage du serveur."""
+    last = ws.load_state()
+    if not last or not os.path.isdir(last):
+        return
+    try:
+        info = ws.set_workspace(last)
+        linked = mem.list_conversations_for_workspace(info["path"])
+        if linked:
+            agent.switch_conversation(linked[0]["id"])
+        else:
+            agent.new_conversation(title=f"Projet — {info['name']}", workspace=info["path"])
+        agent.refresh_system_prompt()
+    except Exception:
+        ws.clear_state()
 
 app.mount("/static", StaticFiles(directory=os.path.join(_BASE, "static")), name="static")
 
@@ -49,6 +69,7 @@ class ChatRequest(BaseModel):
 
 @app.post("/chat")
 async def chat(body: ChatRequest):
+    _stop_event.clear()
     loop = asyncio.get_event_loop()
     q: asyncio.Queue = asyncio.Queue()
 
@@ -56,6 +77,9 @@ async def chat(body: ChatRequest):
         """Tourne dans un thread séparé, pousse chaque event dans la queue."""
         try:
             for event in agent.stream_chat(body.message, body.attachments):
+                if _stop_event.is_set():
+                    loop.call_soon_threadsafe(q.put_nowait, {"type": "stopped"})
+                    break
                 loop.call_soon_threadsafe(q.put_nowait, event)
         except Exception as e:
             loop.call_soon_threadsafe(q.put_nowait, {"type": "error", "message": str(e)})
@@ -78,6 +102,11 @@ async def chat(body: ChatRequest):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+@app.post("/chat/stop")
+async def chat_stop():
+    _stop_event.set()
+    return JSONResponse({"ok": True})
 
 @app.get("/history")
 def history():
@@ -187,6 +216,7 @@ def workspace_browse():
 def workspace_set(body: WorkspaceRequest):
     try:
         info = ws.set_workspace(body.path)
+        ws.save_state(info["path"])
 
         # Trouver la dernière conversation liée à ce workspace, ou en créer une
         linked = mem.list_conversations_for_workspace(info["path"])
@@ -213,6 +243,12 @@ def workspace_set(body: WorkspaceRequest):
     except ValueError as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
 
+@app.post("/workspace/close")
+def workspace_close():
+    ws.clear_state()
+    return JSONResponse({"ok": True})
+
+
 @app.get("/workspace/tree")
 def workspace_tree():
     return JSONResponse(ws.get_tree())
@@ -226,12 +262,16 @@ def workspace_status():
     wpath = ws.get_workspace()
     if not wpath:
         return JSONResponse({"active": False})
+    linked = mem.list_conversations_for_workspace(wpath)
     return JSONResponse({
-        "active":  True,
-        "path":    wpath,
-        "name":    os.path.basename(wpath),
-        "indexed": rag.is_indexed(wpath),
-        "count":   rag.index_count(wpath),
+        "active":   True,
+        "path":     wpath,
+        "name":     os.path.basename(wpath),
+        "indexed":  rag.is_indexed(wpath),
+        "count":    rag.index_count(wpath),
+        "conv":     agent.current_conv,
+        "convs":    linked,
+        "messages": agent.get_history(),
     })
 
 @app.post("/workspace/index")
@@ -357,11 +397,11 @@ def get_models():
     except Exception:
         installed_list, installed_set = [], set()
 
-    # Modèles installés + suggestions non encore installées
-    result = [{"id": m, "installed": True}  for m in installed_list]
-    for s in SUGGESTED_MODELS:
+    all_suggested = SUGGESTED_MODELS + CODE_MODELS
+    result = [{"id": m, "installed": True, "code_only": m in CODE_MODELS} for m in installed_list]
+    for s in all_suggested:
         if s not in installed_set:
-            result.append({"id": s, "installed": False})
+            result.append({"id": s, "installed": False, "code_only": s in CODE_MODELS})
     return JSONResponse(result)
 
 class ModelSelectRequest(BaseModel):

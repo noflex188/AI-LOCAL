@@ -10,6 +10,30 @@ IGNORE_DIRS  = {'.git', '__pycache__', 'node_modules', 'venv', '.venv',
 IGNORE_FILES = {'.DS_Store', 'Thumbs.db', '.gitkeep'}
 
 _workspace: str | None = None
+_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "memory", "state.json")
+
+
+def save_state(path: str):
+    import json
+    os.makedirs(os.path.dirname(_STATE_FILE), exist_ok=True)
+    with open(_STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump({"workspace": path}, f)
+
+
+def load_state() -> str | None:
+    import json
+    if not os.path.exists(_STATE_FILE):
+        return None
+    try:
+        with open(_STATE_FILE, encoding="utf-8") as f:
+            return json.load(f).get("workspace")
+    except Exception:
+        return None
+
+
+def clear_state():
+    if os.path.exists(_STATE_FILE):
+        os.remove(_STATE_FILE)
 
 
 def set_workspace(path: str) -> dict:

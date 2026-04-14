@@ -113,13 +113,17 @@ exit /b 1
 echo.
 echo [4/4] Telechargement du modele IA...
 echo.
-echo   1) gemma4:26b   Qualite maximale   ~17 GB  (necessite 16+ GB RAM)
-echo   2) gemma4:e4b   Leger et rapide     ~3 GB  (necessite 4+ GB RAM)
+echo   1) gemma4:26b          Generaliste puissant      ~17 GB  (16+ GB RAM)
+echo   2) qwen2.5-coder:14b   Specialise code           ~9 GB   (16+ GB RAM)
+echo   3) qwen2.5-coder:7b    Code leger et rapide      ~5 GB   (8+ GB RAM)
+echo   4) gemma4:e4b          Generaliste leger         ~3 GB   (4+ GB RAM)
 echo.
-set /p MODEL_CHOICE=Ton choix [1 ou 2] :
+set /p MODEL_CHOICE=Ton choix [1/2/3/4] :
 
 if "%MODEL_CHOICE%"=="1" goto :pull_26b
-if "%MODEL_CHOICE%"=="2" goto :pull_e4b
+if "%MODEL_CHOICE%"=="2" goto :pull_coder14b
+if "%MODEL_CHOICE%"=="3" goto :pull_coder7b
+if "%MODEL_CHOICE%"=="4" goto :pull_e4b
 echo  Choix invalide. Relance install.bat.
 pause
 exit /b 1
@@ -127,6 +131,16 @@ exit /b 1
 :pull_26b
 echo  Telechargement de gemma4:26b...
 ollama pull gemma4:26b
+goto :pull_nomic
+
+:pull_coder14b
+echo  Telechargement de qwen2.5-coder:14b...
+ollama pull qwen2.5-coder:14b
+goto :pull_nomic
+
+:pull_coder7b
+echo  Telechargement de qwen2.5-coder:7b...
+ollama pull qwen2.5-coder:7b
 goto :pull_nomic
 
 :pull_e4b

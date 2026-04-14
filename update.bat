@@ -10,12 +10,31 @@ echo.
 
 :: Verifier que git est disponible
 git --version >nul 2>&1
-if errorlevel 1 (
-    echo  [ERREUR] Git n'est pas installe ou pas dans le PATH.
-    echo  Installe Git : https://git-scm.com/download/win
-    pause
-    exit /b 1
-)
+if errorlevel 1 goto :installer_git
+goto :git_ok
+
+:installer_git
+echo  Git non trouve - installation automatique...
+winget install --id Git.Git -e --silent --accept-package-agreements --accept-source-agreements
+if not errorlevel 1 goto :git_installe
+echo  winget indisponible - telechargement direct...
+set GIT_URL=https://github.com/git-for-windows/git/releases/download/v2.45.2.windows.1/Git-2.45.2-64-bit.exe
+set GIT_INST=%TEMP%\GitInstaller.exe
+powershell -NoProfile -Command "Invoke-WebRequest -Uri '%GIT_URL%' -OutFile '%GIT_INST%'"
+if errorlevel 1 goto :erreur_git
+"%GIT_INST%" /VERYSILENT /NORESTART /NOCANCEL /SP- /CLOSEAPPLICATIONS /RESTARTAPPLICATIONS /COMPONENTS="icons,ext\reg\shellhere,assoc,assoc_sh"
+:git_installe
+echo  Git installe. Ferme cette fenetre, reouvre-la et relance update.bat
+pause
+exit /b 0
+
+:erreur_git
+echo  [ERREUR] Impossible d'installer Git automatiquement.
+echo  Installe-le manuellement : https://git-scm.com/download/win
+pause
+exit /b 1
+
+:git_ok
 
 :: Verifier qu'on est bien dans un depot git
 git rev-parse --git-dir >nul 2>&1
