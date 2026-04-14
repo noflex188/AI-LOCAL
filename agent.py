@@ -63,38 +63,63 @@ SYSTEM_PROMPT_BASE = """Tu es un assistant IA personnel, intelligent, direct et 
 
 ## Tu es un agent de développement — MODE AGENT ACTIF
 
-Quand un workspace est ouvert, tu AGIS sur les fichiers. Tu n'es pas un chatbot qui montre du code.
+Quand un workspace est ouvert, tu AGIS directement sur les fichiers. Tu ne montres jamais du code sans l'appliquer.
 
-### RÈGLE ABSOLUE
-**Ne jamais écrire de code dans ta réponse.** À la place, appelle immédiatement les outils.
+### CRÉER UN FICHIER
+Écris un bloc de code avec le langage ET le chemin séparés par `:` :
 
-### EXEMPLES DE CE QUI EST ATTENDU
+```python:chemin/script.py
+print("hello")
+```
 
-❌ MAUVAIS — ne jamais faire ça :
-> Voici un script PowerShell :
-> ```powershell
-> Get-ChildItem -Recurse | ...
+Le fichier sera créé automatiquement. Choisis un nom de fichier approprié.
+
+### MODIFIER UN FICHIER EXISTANT
+1. Lis d'abord le fichier avec `read_file` pour voir le contenu exact
+2. Écris un ou plusieurs blocs SEARCH/REPLACE avec le chemin du fichier :
+
+chemin/fichier.py
+<<<<<<< SEARCH
+    code_existant_exact()
+=======
+    nouveau_code()
+>>>>>>> REPLACE
+
+⚠️ Le bloc SEARCH doit correspondre EXACTEMENT au code actuel (espaces et indentation compris).
+Tu peux enchaîner plusieurs blocs SEARCH/REPLACE dans le même message pour le même fichier.
+
+### SUPPRIMER UN FICHIER → utilise l'outil `delete_file`
+### EXÉCUTER UNE COMMANDE → utilise l'outil `run_command`
+### CHERCHER DANS LE CODE → utilise `grep_files` puis `read_file`
+
+### EXEMPLES
+
+❌ MAUVAIS (ne jamais faire) :
+> Voici le script :
+> ```python
+> print("hello")
 > ```
 
-✅ CORRECT — toujours faire ça :
-> [appel create_file("find_duplicates.ps1", "Get-ChildItem -Recurse | ...")]
-> Fait : j'ai créé `find_duplicates.ps1` dans le workspace.
+✅ BON (crée le fichier directement) :
+> ```python:hello.py
+> print("hello")
+> ```
 
-❌ MAUVAIS — ne jamais faire ça :
-> Modifie la ligne 42 par : `return x * 2`
+❌ MAUVAIS (ne jamais faire) :
+> Remplace la ligne 42 par `return x * 2`
 
-✅ CORRECT — toujours faire ça :
-> [appel read_file("app.py")] → [appel patch_file_lines("app.py", 42, 42, "    return x * 2")]
-> Fait : ligne 42 mise à jour dans `app.py`.
+✅ BON (modifie le fichier directement) :
+> app.py
+> <<<<<<< SEARCH
+>     return x
+> =======
+>     return x * 2
+> >>>>>>> REPLACE
 
-### Workflow pour chaque type de tâche
-
-**Créer un fichier** → `create_file(path, content)` — choisit un nom approprié, crée les dossiers si besoin
-**Modifier un fichier** → `read_file` pour voir les lignes → `patch_file_lines` pour modifier
-**Chercher dans le code** → `grep_files(pattern)` → `read_file` pour lire le contexte
-**Exécuter** → `run_command` après avoir créé/modifié
-
-**Seule exception :** si l'utilisateur dit explicitement "montre-moi", "explique-moi" ou "donne-moi un exemple" sans vouloir un fichier.
+### RÈGLE ABSOLUE
+- Ne montre JAMAIS du code brut sans le format `lang:chemin` ou SEARCH/REPLACE
+- AGIS directement : crée, modifie, exécute
+- **Seule exception** : si l'utilisateur dit "montre-moi", "explique-moi" ou demande un exemple théorique
 
 ## Avant d'agir : clarifier si nécessaire
 Si une demande manque de contexte (objectif flou, stack non précisée, etc.), **pose d'abord des questions ciblées**.
@@ -105,7 +130,7 @@ Si une demande manque de contexte (objectif flou, stack non précisée, etc.), *
 ## Format des réponses
 - Pour des listes de choix ou comparatifs, utilise un tableau ou des puces claires.
 - Évite les introductions inutiles du type "Bien sûr !" ou "Absolument !".
-- En mode agent (workspace ouvert) : ne mets JAMAIS de code dans ta réponse — écris-le dans les fichiers via les outils.
+- En mode agent : utilise toujours les formats d'action ci-dessus pour agir sur les fichiers.
 """
 
 
@@ -384,76 +409,91 @@ class Agent:
             if not tool_calls:
                 self.history.append({"role": "assistant", "content": content})
 
-                # Workspace actif + pas de vrai tool call = tenter de forcer l'exécution
+                # Workspace actif + pas de vrai tool call = détecter et exécuter les actions
                 if ws.get_workspace() and not _already_applied(self.history):
+                    from actions import parse_actions, execute_actions
+                    handled = False
 
-                    # ── Étape 1 : détecter des appels d'outils écrits en JSON dans le texte ──
-                    blocks = _extract_code_blocks(content) if _has_code_block(content) else []
+                    # ── Priorité 1 : actions texte (```lang:path, SEARCH/REPLACE) ──
+                    text_actions = parse_actions(content, ws.get_workspace())
+                    if text_actions:
+                        handled = True
+                        yield {"type": "token", "content": "\n\n> ⚙️ Application des modifications…\n\n"}
+                        results = execute_actions(text_actions)
+                        for i, r in enumerate(results):
+                            yield {"type": "tool_start", "name": r["name"], "args": r["args"]}
+                            yield {"type": "tool_end", "name": r["name"], "result": r["result"]}
+                            self.history.append({"role": "tool", "tool_call_id": f"action_{i}", "content": r["result"]})
+                        paths = [r["args"]["path"] for r in results if "path" in r["args"]]
+                        if paths:
+                            names = ", ".join(f"`{p}`" for p in paths)
+                            yield {"type": "token", "content": f"\n\n📝 {names}\n"}
 
-                    # Séparer les blocs JSON (faux tool calls) des vrais blocs de code
-                    fake_calls: list[dict] = []
-                    regular_blocks: list[dict] = []
-                    for b in blocks:
-                        if b["lang"].lower() in ("json", "") and _looks_like_tool_call(b["code"]):
-                            try:
-                                parsed = json.loads(b["code"].strip())
-                                fake_calls.append({
-                                    "name": parsed["name"],
-                                    "args": parsed["arguments"] if isinstance(parsed["arguments"], dict) else {},
-                                })
-                            except Exception:
+                    # ── Priorité 2 : faux tool calls JSON ──
+                    if not handled:
+                        blocks = _extract_code_blocks(content) if _has_code_block(content) else []
+                        fake_calls: list[dict] = []
+                        regular_blocks: list[dict] = []
+                        for b in blocks:
+                            if b["lang"].lower() in ("json", "") and _looks_like_tool_call(b["code"]):
+                                try:
+                                    parsed = json.loads(b["code"].strip())
+                                    fake_calls.append({
+                                        "name": parsed["name"],
+                                        "args": parsed["arguments"] if isinstance(parsed["arguments"], dict) else {},
+                                    })
+                                except Exception:
+                                    regular_blocks.append(b)
+                            else:
                                 regular_blocks.append(b)
-                        else:
-                            regular_blocks.append(b)
+                        fake_calls += _extract_fake_tool_calls(content)
 
-                    # Chercher aussi des JSON tool calls en texte libre (hors blocs)
-                    fake_calls += _extract_fake_tool_calls(content)
-
-                    if fake_calls:
-                        # Exécuter directement les faux tool calls détectés
-                        yield {"type": "token", "content": "\n\n> ⚙️ Exécution des actions détectées…\n\n"}
-                        created = []
-                        for i, fc in enumerate(fake_calls):
-                            yield {"type": "tool_start", "name": fc["name"], "args": fc["args"]}
-                            try:
-                                result = call_tool(fc["name"], fc["args"])
-                            except Exception as e:
-                                result = f"Erreur : {e}"
-                            self.history.append({"role": "tool", "tool_call_id": f"fake_{i}", "content": result})
-                            yield {"type": "tool_end", "name": fc["name"], "result": result}
-                            if "path" in fc["args"]:
-                                created.append(fc["args"]["path"])
-                        if created:
-                            names = ", ".join(f"`{n}`" for n in created)
-                            yield {"type": "token", "content": f"\n\n📝 Fichier(s) créé(s) : {names}\n"}
-
-                    elif regular_blocks:
-                        if auto_retries == 0:
-                            # 1ère tentative : demander au modèle d'utiliser les outils
-                            auto_retries += 1
-                            blocks_desc = ""
-                            for i, b in enumerate(regular_blocks):
-                                name = _guess_filename(self.history, b["lang"], i)
-                                blocks_desc += f"\nBloc {i+1} → créer `{name}` :\n```\n{b['code'][:400]}{'...' if len(b['code'])>400 else ''}\n```\n"
-                            correction = (
-                                f"Tu as affiché du code sans créer de fichier. "
-                                f"Appelle create_file maintenant pour chaque bloc ci-dessous. "
-                                f"Ne génère pas de texte, utilise les outils directement.{blocks_desc}"
-                            )
-                            yield {"type": "token", "content": "\n\n> ⚙️ Création du fichier…\n\n"}
-                            self.history.append({"role": "user", "content": correction})
-                            continue
-                        else:
-                            # Le modèle persiste → on force en Python
+                        if fake_calls:
+                            handled = True
+                            yield {"type": "token", "content": "\n\n> ⚙️ Exécution des actions détectées…\n\n"}
                             created = []
-                            for i, b in enumerate(regular_blocks):
-                                filename = _guess_filename(self.history, b["lang"], i)
-                                result = call_tool("create_file", {"path": filename, "content": b["code"]})
-                                created.append(filename)
-                                self.history.append({"role": "tool", "tool_call_id": f"force_{i}", "content": result})
-                                yield {"type": "tool_end", "name": "create_file", "result": result}
-                            names = ", ".join(f"`{n}`" for n in created)
-                            yield {"type": "token", "content": f"\n\n📝 Fichier(s) créé(s) automatiquement : {names}\n"}
+                            for i, fc in enumerate(fake_calls):
+                                yield {"type": "tool_start", "name": fc["name"], "args": fc["args"]}
+                                try:
+                                    result = call_tool(fc["name"], fc["args"])
+                                except Exception as e:
+                                    result = f"Erreur : {e}"
+                                self.history.append({"role": "tool", "tool_call_id": f"fake_{i}", "content": result})
+                                yield {"type": "tool_end", "name": fc["name"], "result": result}
+                                if "path" in fc["args"]:
+                                    created.append(fc["args"]["path"])
+                            if created:
+                                names = ", ".join(f"`{n}`" for n in created)
+                                yield {"type": "token", "content": f"\n\n📝 Fichier(s) créé(s) : {names}\n"}
+
+                        # ── Priorité 3 : blocs de code bruts (dernier recours) ──
+                        elif regular_blocks:
+                            if auto_retries == 0:
+                                auto_retries += 1
+                                correction = (
+                                    "Tu as affiché du code sans créer de fichier. "
+                                    "Utilise le format ```langage:chemin/fichier.ext pour créer un fichier, "
+                                    "ou le format SEARCH/REPLACE pour modifier un fichier existant. "
+                                    "Agis maintenant."
+                                )
+                                yield {"type": "token", "content": "\n\n> ⚙️ Création du fichier…\n\n"}
+                                self.history.append({"role": "user", "content": correction})
+                                continue
+                            else:
+                                # Force en Python avec le meilleur nom deviné
+                                created = []
+                                for i, b in enumerate(regular_blocks):
+                                    filename = _guess_filename(self.history, b["lang"], i)
+                                    wpath = ws.get_workspace()
+                                    if wpath:
+                                        import os
+                                        filename = os.path.join(wpath, filename)
+                                    result = call_tool("create_file", {"path": filename, "content": b["code"]})
+                                    created.append(filename)
+                                    self.history.append({"role": "tool", "tool_call_id": f"force_{i}", "content": result})
+                                    yield {"type": "tool_end", "name": "create_file", "result": result}
+                                names = ", ".join(f"`{n}`" for n in created)
+                                yield {"type": "token", "content": f"\n\n📝 Fichier(s) créé(s) automatiquement : {names}\n"}
 
                 self._save()
                 yield {"type": "conv_meta", "conv": self.current_conv}
