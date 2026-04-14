@@ -380,8 +380,6 @@ class Agent:
         msg = self._build_user_message(user_message, attachments or [])
         self.history.append(msg)
 
-        auto_retries = 0
-        MAX_AUTO_RETRIES = 3
         loop_iterations = 0
         MAX_ITERATIONS = 12
         read_counts: dict[str, int] = {}   # chemin → nombre de read_file consécutifs
@@ -471,37 +469,22 @@ class Agent:
                                 names = ", ".join(f"`{n}`" for n in created)
                                 yield {"type": "token", "content": f"\n\n📝 Fichier(s) créé(s) : {names}\n"}
 
-                        # ── Priorité 3 : blocs de code bruts (dernier recours) ──
+                        # ── Priorité 3 : blocs de code bruts → création directe (pas de retry) ──
                         elif regular_blocks:
-                            if auto_retries == 0:
-                                auto_retries += 1
-                                files_hint = ""
-                                if recently_read:
-                                    files_hint = f" Fichiers récemment lus : {', '.join(recently_read[-3:])}."
-                                correction = (
-                                    "Tu as affiché du code sans créer de fichier. "
-                                    "Utilise le format ```langage:chemin/fichier.ext pour créer ou réécrire un fichier, "
-                                    "ou le format SEARCH/REPLACE pour modifier un fichier existant."
-                                    f"{files_hint} Agis maintenant."
-                                )
-                                yield {"type": "token", "content": "\n\n> ⚙️ Création du fichier…\n\n"}
-                                self.history.append({"role": "user", "content": correction})
-                                continue
-                            else:
-                                # Force en Python avec le meilleur nom deviné
-                                created = []
-                                for i, b in enumerate(regular_blocks):
-                                    filename = _guess_filename(self.history, b["lang"], i)
-                                    wpath = ws.get_workspace()
-                                    if wpath:
-                                        import os
-                                        filename = os.path.join(wpath, filename)
-                                    result = call_tool("create_file", {"path": filename, "content": b["code"]})
-                                    created.append(filename)
-                                    self.history.append({"role": "tool", "tool_call_id": f"force_{i}", "content": result})
-                                    yield {"type": "tool_end", "name": "create_file", "result": result}
-                                names = ", ".join(f"`{n}`" for n in created)
-                                yield {"type": "token", "content": f"\n\n📝 Fichier(s) créé(s) automatiquement : {names}\n"}
+                            created = []
+                            for i, b in enumerate(regular_blocks):
+                                filename = _guess_filename(self.history, b["lang"], i)
+                                wpath = ws.get_workspace()
+                                if wpath:
+                                    import os
+                                    filename = os.path.join(wpath, filename)
+                                result = call_tool("create_file", {"path": filename, "content": b["code"]})
+                                created.append(filename)
+                                self.history.append({"role": "tool", "tool_call_id": f"force_{i}", "content": result})
+                                yield {"type": "tool_start", "name": "create_file", "args": {"path": filename}}
+                                yield {"type": "tool_end", "name": "create_file", "result": result}
+                            names = ", ".join(f"`{n}`" for n in created)
+                            yield {"type": "token", "content": f"\n\n📝 Fichier(s) créé(s) : {names}\n"}
 
                 self._save()
                 yield {"type": "conv_meta", "conv": self.current_conv}
