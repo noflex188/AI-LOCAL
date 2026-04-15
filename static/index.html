@@ -80,6 +80,11 @@ body { font-family:var(--font); background:var(--bg); color:var(--text); font-si
   text-align:center; line-height:14px; display:none;
 }
 .activity-badge.visible { display:block; }
+.update-badge { background:var(--success, #22c55e); }
+#btn-update { transition:all .3s; }
+#btn-update:hover { color:var(--accent-h); }
+@keyframes update-pulse { 0%,100%{opacity:1} 50%{opacity:.5} }
+#btn-update.has-update { animation: update-pulse 2s ease-in-out 3; }
 
 /* ── Sidebar panels ── */
 .sidebar-panel { flex:1; display:flex; flex-direction:column; overflow:hidden; }
@@ -936,6 +941,10 @@ body { font-family:var(--font); background:var(--bg); color:var(--text); font-si
     <button class="activity-btn" id="act-memory" title="Mémoire long-terme">
       <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
     </button>
+    <button class="activity-btn" id="btn-update" title="Mise à jour disponible" style="display:none;color:var(--accent);">
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/></svg>
+      <span class="activity-badge update-badge" id="update-badge"></span>
+    </button>
     <div style="writing-mode:vertical-rl;transform:rotate(180deg);font-size:9px;color:var(--text-3);opacity:.4;padding:8px 0;letter-spacing:.05em;user-select:none;">By Noflex18</div>
   </nav>
 
@@ -1163,11 +1172,14 @@ const $anchor      = document.getElementById('anchor');
 // ── Init ──────────────────────────────────────────────────────────────────────
 async function init() {
   loadContext();
-  loadModels();           // pré-rempli les dropdowns modèles dès le départ
+  loadModels();
   await loadConversations();
   await loadCurrentHistory();
   loadWorkspaceStatus();
   bindEvents();
+  checkForUpdates();
+  // Vérifier toutes les 30 minutes
+  setInterval(checkForUpdates, 30 * 60 * 1000);
 }
 
 function bindEvents() {
@@ -2409,6 +2421,48 @@ function showTyping(v) {
     existing.remove();
   }
 }
+
+// ── Update checker ────────────────────────────────────────────────────────────
+
+async function checkForUpdates() {
+  try {
+    const data = await fetch('/check-update').then(r => r.json());
+    const btn = document.getElementById('btn-update');
+    const badge = document.getElementById('update-badge');
+    if (data.update_available) {
+      btn.style.display = '';
+      btn.classList.add('has-update');
+      badge.textContent = data.commits_behind || '!';
+      badge.classList.add('visible');
+      btn.title = `Mise à jour disponible (${data.commits_behind} commit${data.commits_behind > 1 ? 's' : ''})`;
+    } else {
+      btn.style.display = 'none';
+      btn.classList.remove('has-update');
+      badge.classList.remove('visible');
+    }
+  } catch {}
+}
+
+document.getElementById('btn-update').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-update');
+  if (!confirm('Installer la mise à jour ? Le serveur devra être redémarré.')) return;
+  btn.style.pointerEvents = 'none';
+  btn.style.opacity = '.5';
+  try {
+    const data = await fetch('/update', { method: 'POST' }).then(r => r.json());
+    if (data.ok) {
+      alert('Mise à jour installée !\n\nRedémarre le serveur (relance start.bat) pour appliquer.');
+      btn.style.display = 'none';
+    } else {
+      alert('Erreur : ' + (data.error || data.output || 'Échec de la mise à jour'));
+    }
+  } catch (e) {
+    alert('Erreur réseau : ' + e.message);
+  } finally {
+    btn.style.pointerEvents = '';
+    btn.style.opacity = '';
+  }
+});
 
 init();
 </script>

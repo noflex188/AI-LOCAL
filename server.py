@@ -108,6 +108,54 @@ async def chat_stop():
     _stop_event.set()
     return JSONResponse({"ok": True})
 
+# ── Update check ─────────────────────────────────────────────────────────────
+
+@app.get("/check-update")
+def check_update():
+    """Compare le HEAD local avec le HEAD distant sur GitHub."""
+    import subprocess
+    try:
+        subprocess.run(
+            ["git", "fetch", "--quiet"],
+            cwd=_BASE, capture_output=True, timeout=10,
+        )
+        local = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=_BASE, capture_output=True, text=True, timeout=5,
+        ).stdout.strip()
+        remote = subprocess.run(
+            ["git", "rev-parse", "origin/main"],
+            cwd=_BASE, capture_output=True, text=True, timeout=5,
+        ).stdout.strip()
+        behind = subprocess.run(
+            ["git", "rev-list", "--count", "HEAD..origin/main"],
+            cwd=_BASE, capture_output=True, text=True, timeout=5,
+        ).stdout.strip()
+        return JSONResponse({
+            "update_available": local != remote,
+            "commits_behind": int(behind) if behind.isdigit() else 0,
+        })
+    except Exception as e:
+        return JSONResponse({"update_available": False, "error": str(e)})
+
+
+@app.post("/update")
+def do_update():
+    """Exécute git pull pour mettre à jour l'application."""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["git", "pull", "--ff-only"],
+            cwd=_BASE, capture_output=True, text=True, timeout=30,
+        )
+        return JSONResponse({
+            "ok": result.returncode == 0,
+            "output": (result.stdout + result.stderr).strip(),
+        })
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+
 @app.get("/history")
 def history():
     return JSONResponse({
