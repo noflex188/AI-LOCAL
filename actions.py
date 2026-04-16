@@ -111,11 +111,28 @@ def parse_actions(text: str, workspace: str = "", recently_read: list[str] = Non
             "replace": m.group(3),
         })
 
-    # Note : l'auto-détection des blocs sans chemin (ancienne priorité 3) a été
-    # supprimée — elle causait des écrasements accidentels de fichiers quand le
-    # modèle produisait un "exemple de code" ou une "version finale" sans
-    # spécifier explicitement de fichier cible.
-    # Le modèle DOIT utiliser ```lang:chemin``` pour créer/réécrire un fichier.
+    # ── 3. Blocs shell (bash/sh/cmd) sans chemin → run_command ──────────────────
+    # Permet au modèle d'écrire ```bash\npip install pygame\n``` pour exécuter
+    _SHELL_LANGS = {"bash", "sh", "shell", "cmd", "powershell", "ps1", "zsh"}
+    for m in re.finditer(r'```(' + '|'.join(_SHELL_LANGS) + r')\s*\n([\s\S]*?)```', text, re.IGNORECASE):
+        if _overlaps(m.start(), m.end()):
+            continue
+        cmd_block = m.group(2).strip()
+        if not cmd_block:
+            continue
+        # Vérifier que ce n'est pas un bloc avec chemin (déjà géré au niveau 1)
+        # En divisant en lignes de commandes (ignorer commentaires et lignes vides)
+        commands = [
+            line.strip() for line in cmd_block.split('\n')
+            if line.strip() and not line.strip().startswith('#')
+        ]
+        if commands:
+            used.append((m.start(), m.end()))
+            for cmd in commands:
+                actions.append({
+                    "type": "run",
+                    "command": cmd,
+                })
 
     return actions
 
@@ -143,6 +160,13 @@ def execute_actions(actions: list[dict]) -> list[dict]:
             results.append({
                 "name": "patch_file",
                 "args": {"path": action["path"]},
+                "result": r,
+            })
+        elif action["type"] == "run":
+            r = call_tool("run_command", {"command": action["command"]})
+            results.append({
+                "name": "run_command",
+                "args": {"command": action["command"]},
                 "result": r,
             })
         elif action["type"] == "too_large":

@@ -5,6 +5,7 @@ from tools import TOOL_SCHEMAS, call_tool
 import memory as mem
 from context import build_context_block
 from confirmation import confirm_manager, SENSITIVE_TOOLS
+from code_agent import stream_code as _stream_code
 
 colorama_init(autoreset=True)
 
@@ -460,6 +461,9 @@ class Agent:
 
     def stream_chat(self, user_message: str, attachments=None):
         import workspace as ws
+        if ws.get_workspace():
+            yield from _stream_code(self, user_message, attachments or [])
+            return
         msg = self._build_user_message(user_message, attachments or [])
         self.history.append(msg)
 
