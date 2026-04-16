@@ -262,6 +262,21 @@ def delete_file(path: str) -> str:
 
 # ── Shell tool ────────────────────────────────────────────────────────────────
 
+def pip_install(packages) -> str:
+    """Install Python packages via pip into the current virtual environment."""
+    if not packages:
+        return "Error: no packages specified. Provide a list of package names, e.g. ['pygame', 'numpy']."
+    if isinstance(packages, str):
+        pkg_str = packages
+    elif isinstance(packages, list):
+        pkg_str = " ".join(str(p) for p in packages if p)
+    else:
+        pkg_str = str(packages)
+    if not pkg_str.strip():
+        return "Error: no packages specified."
+    return run_command(f"pip install {pkg_str}")
+
+
 def run_command(command: str) -> str:
     """Run a shell command and return stdout + stderr (max 4000 chars)."""
     try:
@@ -387,6 +402,7 @@ TOOL_FUNCTIONS = {
     "list_dir":         list_dir,
     "delete_file":      delete_file,
     "run_command":      run_command,
+    "pip_install":      pip_install,
     "get_datetime":     get_datetime,
     "web_search":       web_search,
     "fetch_url":        fetch_url,
@@ -478,7 +494,7 @@ TOOL_SCHEMAS = [
             "name": "run_command",
             "description": (
                 "Run a shell command and return its output. "
-                "Use this to run Python scripts, install packages, execute tests, etc."
+                "Use this to run Python scripts, execute tests, git commands, etc."
             ),
             "parameters": {
                 "type": "object",
@@ -486,6 +502,27 @@ TOOL_SCHEMAS = [
                     "command": {"type": "string", "description": "Shell command to execute, e.g. 'python app.py'"},
                 },
                 "required": ["command"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "pip_install",
+            "description": (
+                "Install one or more Python packages into the current virtual environment using pip. "
+                "Use this instead of run_command when you need to install dependencies."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "packages": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of package names to install, e.g. ['pygame', 'numpy']",
+                    },
+                },
+                "required": ["packages"],
             },
         },
     },
@@ -619,8 +656,40 @@ TOOL_SCHEMAS = [
 def call_tool(name: str, args: dict) -> str:
     fn = TOOL_FUNCTIONS.get(name)
     if fn is None:
-        return f"Unknown tool: {name}"
+        # Suggestions pour les noms d'outils courants mal orthographiés
+        aliases = {
+            "pip_install": "pip_install",
+            "install_packages": "pip_install",
+            "install_package": "pip_install",
+            "write_file": "create_file",
+            "save_file": "create_file",
+            "edit_file": "patch_file",
+            "modify_file": "patch_file",
+            "execute_command": "run_command",
+            "shell_command": "run_command",
+        }
+        suggestion = aliases.get(name)
+        if suggestion:
+            return call_tool(suggestion, args)
+        return f"Unknown tool: {name}. Available: {', '.join(TOOL_FUNCTIONS.keys())}"
     try:
         return fn(**args)
+    except TypeError as e:
+        # Message d'erreur utile pour les arguments manquants
+        import inspect
+        sig = inspect.signature(fn)
+        required = [
+            p for p, v in sig.parameters.items()
+            if v.default is inspect.Parameter.empty and v.kind
+            not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+        ]
+        missing = [p for p in required if p not in args]
+        if missing:
+            return (
+                f"Tool error ({name}): missing required argument(s): {', '.join(missing)}. "
+                f"Provided: {list(args.keys())}. "
+                f"Required: {required}."
+            )
+        return f"Tool error ({name}): {e}"
     except Exception as e:
         return f"Tool error ({name}): {e}"
