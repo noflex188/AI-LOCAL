@@ -114,6 +114,43 @@ async def chat_stop():
     _stop_event.set()
     return JSONResponse({"ok": True})
 
+
+class TerminalRequest(BaseModel):
+    command: str
+
+@app.post("/terminal/run")
+async def terminal_run(body: TerminalRequest):
+    """Run a shell command in the workspace and stream output via SSE."""
+    wpath = ws.get_workspace() or _BASE
+    env = os.environ.copy()
+    import sys as _sys
+    venv_bin = os.path.dirname(_sys.executable)
+    env["PATH"] = venv_bin + os.pathsep + env.get("PATH", "")
+    env["VIRTUAL_ENV"] = os.path.dirname(venv_bin)
+
+    async def stream():
+        try:
+            proc = await asyncio.create_subprocess_shell(
+                body.command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                cwd=wpath,
+                env=env,
+            )
+            async for line in proc.stdout:
+                text = line.decode("utf-8", errors="replace")
+                yield f"data: {json.dumps({'type': 'output', 'text': text})}\n\n"
+            await proc.wait()
+            yield f"data: {json.dumps({'type': 'done', 'code': proc.returncode})}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'error', 'text': str(e)})}\n\n"
+
+    return StreamingResponse(
+        stream(), media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 # ── Update check ─────────────────────────────────────────────────────────────
 
 @app.get("/check-update")

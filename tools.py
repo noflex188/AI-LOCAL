@@ -43,13 +43,38 @@ def _safe_path(path: str) -> str:
 
 # ── File tools ───────────────────────────────────────────────────────────────
 
+def _make_diff(old_content: str, new_content: str, path: str) -> str:
+    """Compute a unified diff between old and new content."""
+    import difflib
+    name = os.path.basename(path)
+    diff = list(difflib.unified_diff(
+        old_content.splitlines(keepends=True),
+        new_content.splitlines(keepends=True),
+        fromfile=f"a/{name}",
+        tofile=f"b/{name}",
+        n=2,
+    ))
+    return "".join(diff)
+
+
 def create_file(path: str, content: str) -> str:
     path = _safe_path(path)
+    old_content = None
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                old_content = f.read()
+        except Exception:
+            pass
     dir_ = os.path.dirname(path)
     if dir_:
         os.makedirs(dir_, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
+    if old_content is not None and old_content != content:
+        diff = _make_diff(old_content, content, path)
+        if diff:
+            return f"File updated: {path}\n<<<DIFF>>>\n{diff}\n<<<END_DIFF>>>"
     return f"File created: {path}"
 
 
@@ -137,7 +162,11 @@ def patch_file(path: str, old: str, new: str) -> str:
     if result is not None:
         with open(path, "w", encoding="utf-8") as f:
             f.write(result)
-        return f"Patched: {path}" + (f" ({info})" if info != "exact" else "")
+        diff = _make_diff(content, result, path)
+        status = f"Patched: {path}" + (f" ({info})" if info != "exact" else "")
+        if diff:
+            return f"{status}\n<<<DIFF>>>\n{diff}\n<<<END_DIFF>>>"
+        return status
 
     return (
         f"Error: text to replace not found in {path}. {info}. "

@@ -53,7 +53,7 @@ body { font-family:var(--font); background:var(--bg); color:var(--text); font-si
 #activity-bar { grid-column:1; grid-row:2/5; border-right:1px solid var(--border); background:var(--sidebar-bg); display:flex; flex-direction:column; align-items:center; padding:8px 0; gap:4px; }
 #sidebar      { grid-column:2; grid-row:2/5; border-right:1px solid var(--border); display:flex; flex-direction:column; background:var(--sidebar-bg); overflow:hidden; }
 #header       { grid-column:3; grid-row:2; }
-#chat         { grid-column:3; grid-row:3; overflow-y:auto; }
+#chat         { grid-column:3; grid-row:3; overflow:hidden; }
 #input-bar    { grid-column:3; grid-row:4; }
 
 /* ── Context bar ── */
@@ -291,9 +291,8 @@ body { font-family:var(--font); background:var(--bg); color:var(--text); font-si
 #pull-cancel:hover { border-color:var(--error); color:var(--error); }
 
 /* ── Chat ── */
-#chat { scroll-behavior:smooth; padding:20px 0 8px; }
-#chat::-webkit-scrollbar { width:4px; }
-#chat::-webkit-scrollbar-thumb { background:var(--border2); border-radius:2px; }
+#chat { padding:0; }
+#messages-scroll { padding:20px 0 8px; }
 #messages { max-width:740px; margin:0 auto; padding:0 20px; }
 
 /* ── Welcome ── */
@@ -467,6 +466,42 @@ body { font-family:var(--font); background:var(--bg); color:var(--text); font-si
 }
 @keyframes spin { to { transform:rotate(360deg); } }
 #input-hint { text-align:center; font-size:11px; color:var(--text-3); margin-top:6px; max-width:740px; margin-left:auto; margin-right:auto; }
+
+/* ── Terminal ── */
+#chat { display:flex; flex-direction:column; overflow:hidden; }
+#messages-scroll { flex:1; overflow-y:auto; scroll-behavior:smooth; }
+#messages-scroll::-webkit-scrollbar { width:4px; }
+#messages-scroll::-webkit-scrollbar-thumb { background:var(--border2); border-radius:2px; }
+#terminal-panel { height:0; overflow:hidden; transition:height .2s ease; display:flex; flex-direction:column; background:#0d0d0d; border-top:1px solid #333; font-family:'Cascadia Code','Fira Mono','Consolas',monospace; font-size:12.5px; }
+#terminal-panel.open { height:220px; }
+#terminal-header-bar { display:flex; align-items:center; gap:8px; padding:4px 10px; background:#161616; border-bottom:1px solid #2a2a2a; flex-shrink:0; }
+.term-title { color:#aaa; font-size:11px; font-weight:600; }
+#terminal-cwd { color:#555; font-size:10px; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+#btn-terminal-clear, #btn-terminal-close { background:none; border:none; cursor:pointer; color:#555; font-size:12px; padding:2px 5px; border-radius:3px; }
+#btn-terminal-clear:hover, #btn-terminal-close:hover { color:#aaa; background:#222; }
+#terminal-output { flex:1; overflow-y:auto; padding:6px 10px; color:#d4d4d4; white-space:pre-wrap; word-break:break-all; }
+#terminal-output::-webkit-scrollbar { width:3px; }
+#terminal-output::-webkit-scrollbar-thumb { background:#333; }
+.term-line { line-height:1.5; }
+.term-cmd { color:#7cb9ff; margin-top:4px; }
+.term-out { color:#d4d4d4; }
+.term-err { color:#f87171; }
+.term-done-ok { color:#4ade80; font-size:11px; }
+.term-done-err { color:#f87171; font-size:11px; }
+#terminal-input-row { display:flex; align-items:center; gap:6px; padding:5px 10px; border-top:1px solid #1e1e1e; flex-shrink:0; background:#111; }
+.term-prompt { color:#7cb9ff; font-weight:700; }
+#terminal-input { flex:1; background:none; border:none; outline:none; color:#e2e8f0; font-family:inherit; font-size:12.5px; }
+#btn-terminal-run { background:none; border:1px solid #333; color:#777; padding:2px 8px; border-radius:4px; cursor:pointer; font-size:13px; }
+#btn-terminal-run:hover { color:#aaa; border-color:#555; }
+
+/* ── Diff rendering ── */
+.diff-block { font-family:'Cascadia Code','Fira Mono','Consolas',monospace; font-size:11.5px; background:#0d0d0d; border-radius:6px; overflow:hidden; margin-top:6px; max-height:200px; overflow-y:auto; }
+.diff-line { padding:1px 8px; line-height:1.6; white-space:pre; }
+.diff-add { background:#14291a; color:#4ade80; }
+.diff-remove { background:#2d1010; color:#f87171; }
+.diff-hunk { background:#1a1a2e; color:#818cf8; }
+.diff-ctx { color:#6b7280; }
+.diff-header { color:#9ca3af; }
 
 /* ── Memory panel ── */
 #panel-backdrop { display:none; position:fixed; inset:0; background:#00000066; z-index:40; animation:fadeIn .2s; }
@@ -1045,6 +1080,7 @@ body { font-family:var(--font); background:var(--bg); color:var(--text); font-si
         </button>
         <div id="model-dropdown"></div>
       </div>
+      <button id="btn-terminal-toggle" title="Terminal" style="background:none;border:none;cursor:pointer;color:var(--text-3);padding:4px 8px;border-radius:6px;font-size:14px;transition:.15s;" onmouseover="this.style.color='var(--text)'" onmouseout="this.style.color='var(--text-3)'">⌨️</button>
       <div id="status"></div>
     </div>
   </header>
@@ -1062,8 +1098,25 @@ body { font-family:var(--font); background:var(--bg); color:var(--text); font-si
 
   <!-- Chat -->
   <main id="chat">
-    <div id="messages"></div>
-    <div id="anchor"></div>
+    <div id="messages-scroll">
+      <div id="messages"></div>
+      <div id="anchor"></div>
+    </div>
+    <!-- Terminal Panel -->
+    <div id="terminal-panel">
+      <div id="terminal-header-bar">
+        <span class="term-title">⚡ Terminal</span>
+        <span id="terminal-cwd"></span>
+        <button id="btn-terminal-clear" title="Effacer">🗑</button>
+        <button id="btn-terminal-close" title="Fermer">✕</button>
+      </div>
+      <div id="terminal-output"></div>
+      <div id="terminal-input-row">
+        <span class="term-prompt">$</span>
+        <input id="terminal-input" type="text" placeholder="commande…" autocomplete="off" spellcheck="false">
+        <button id="btn-terminal-run">↵</button>
+      </div>
+    </div>
   </main>
 
   <!-- Input -->
@@ -1167,6 +1220,7 @@ const $backdrop    = document.getElementById('panel-backdrop');
 const $memoryList  = document.getElementById('memory-list');
 const $ctxBar      = document.getElementById('ctx-bar');
 const $anchor      = document.getElementById('anchor');
+const $messagesScroll = document.getElementById('messages-scroll');
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 async function init() {
@@ -1466,11 +1520,23 @@ async function sendMessage() {
   setGenerating(false);
 }
 
+const _pendingToolArgs = {};
 function handleEvent(bubble, ev) {
   switch (ev.type) {
     case 'token':      bubble.addToken(ev.content); break;
-    case 'tool_start': bubble.addTool(ev.name, ev.args); break;
-    case 'tool_end':   bubble.finishTool(ev.name, ev.result); break;
+    case 'tool_start':
+      _pendingToolArgs[ev.name] = ev.args;
+      bubble.addTool(ev.name, ev.args);
+      break;
+    case 'tool_end':
+      bubble.finishTool(ev.name, ev.result);
+      if (ev.name === 'run_command') {
+        const cmd = (_pendingToolArgs['run_command'] || {}).command || '';
+        terminalAppend(cmd, ev.result, false);
+        openTerminal();
+      }
+      delete _pendingToolArgs[ev.name];
+      break;
     case 'tool_denied':bubble.addDenied(ev.name); break;
     case 'confirm':    showConfirmModal(ev, bubble); break;
     case 'error':      bubble.showError(ev.message); break;
@@ -1631,7 +1697,28 @@ function createAssistantBubble() {
       const card = lastTool || toolsEl.querySelector(`[data-name="${name}"]`);
       if (!card) return;
       card.querySelector('.tool-status').innerHTML = '<span class="tool-check">✓</span>';
-      card.querySelector('.tool-result').textContent = result;
+      const diffMatch = result.match(/<<<DIFF>>>\n([\s\S]*?)\n<<<END_DIFF>>>/);
+      if (diffMatch) {
+        const mainResult = result.replace(/\n<<<DIFF>>>[\s\S]*<<<END_DIFF>>>/, '');
+        card.querySelector('.tool-result').textContent = mainResult;
+        const diffEl = document.createElement('div');
+        diffEl.className = 'diff-block';
+        diffMatch[1].split('\n').forEach(line => {
+          const lineEl = document.createElement('div');
+          lineEl.className = 'diff-line';
+          if (line.startsWith('+') && !line.startsWith('+++')) lineEl.classList.add('diff-add');
+          else if (line.startsWith('-') && !line.startsWith('---')) lineEl.classList.add('diff-remove');
+          else if (line.startsWith('@@')) lineEl.classList.add('diff-hunk');
+          else if (line.startsWith('+++') || line.startsWith('---')) lineEl.classList.add('diff-header');
+          else lineEl.classList.add('diff-ctx');
+          lineEl.textContent = line;
+          diffEl.appendChild(lineEl);
+        });
+        card.querySelector('.tool-body').appendChild(diffEl);
+        card.classList.add('open');
+      } else {
+        card.querySelector('.tool-result').textContent = result;
+      }
     },
 
     addDenied(name) {
@@ -1973,17 +2060,24 @@ $previewOverlay.addEventListener('click', e => {
 });
 
 async function previewFile(path, name, size) {
+  const ext = name.split('.').pop().toLowerCase();
   document.getElementById('preview-filename').textContent = name;
   document.getElementById('preview-size').textContent     = fmtSize(size || 0);
-  document.getElementById('preview-content').textContent  = 'Chargement…';
+  const pre = document.getElementById('preview-content');
+  pre.innerHTML = '<code>Chargement…</code>';
   $previewOverlay.classList.add('open');
   try {
     const r = await fetch('/workspace/file?path=' + encodeURIComponent(path)).then(r => r.json());
-    if (r.error) { document.getElementById('preview-content').textContent = 'Erreur : ' + r.error; return; }
+    if (r.error) { pre.textContent = 'Erreur : ' + r.error; return; }
     let content = r.content;
     if (r.truncated) content += '\n\n… (fichier tronqué à 60 Ko)';
-    document.getElementById('preview-content').textContent = content;
-  } catch (e) { document.getElementById('preview-content').textContent = 'Erreur : ' + e.message; }
+    const code = document.createElement('code');
+    code.className = `language-${ext}`;
+    code.textContent = content;
+    pre.innerHTML = '';
+    pre.appendChild(code);
+    if (typeof hljs !== 'undefined') hljs.highlightElement(code);
+  } catch (e) { pre.textContent = 'Erreur : ' + e.message; }
 }
 
 // ── Sessions de notes vocales ─────────────────────────────────────────────────
@@ -2382,8 +2476,8 @@ function addCopyButtons(el) {
 
   });
 }
-function scrollToBottom(smooth = true) {
-  $anchor.scrollIntoView({ behavior: smooth ? 'smooth' : 'instant', block: 'end' });
+function scrollToBottom(smooth = false) {
+  $messagesScroll.scrollTo({ top: $messagesScroll.scrollHeight, behavior: smooth ? 'smooth' : 'instant' });
 }
 function setGenerating(v) {
   isGenerating = v;
@@ -2465,6 +2559,127 @@ document.getElementById('btn-update').addEventListener('click', async () => {
     btn.style.pointerEvents = '';
     btn.style.opacity = '';
   }
+});
+
+// ── Terminal ─────────────────────────────────────────────────────────────────
+
+const $termPanel  = document.getElementById('terminal-panel');
+const $termOutput = document.getElementById('terminal-output');
+const $termInput  = document.getElementById('terminal-input');
+const $termCwd    = document.getElementById('terminal-cwd');
+
+function openTerminal() {
+  $termPanel.classList.add('open');
+  updateTerminalCwd();
+  $termOutput.scrollTop = $termOutput.scrollHeight;
+}
+
+function closeTerminal() {
+  $termPanel.classList.remove('open');
+}
+
+function updateTerminalCwd() {
+  const status = fetch('/workspace/status').then(r => r.json()).then(s => {
+    $termCwd.textContent = s.active ? s.path : '~';
+  }).catch(() => {});
+}
+
+function terminalAppend(command, output, isUserCmd = true) {
+  if (isUserCmd && command) {
+    const cmdLine = document.createElement('div');
+    cmdLine.className = 'term-line term-cmd';
+    cmdLine.textContent = '$ ' + command;
+    $termOutput.appendChild(cmdLine);
+  }
+  if (output) {
+    // Split by lines and detect errors
+    const lines = output.split('\n');
+    lines.forEach(line => {
+      if (!line && lines.indexOf(line) === lines.length - 1) return; // skip trailing empty
+      const el = document.createElement('div');
+      el.className = 'term-line term-out';
+      el.textContent = line;
+      $termOutput.appendChild(el);
+    });
+  }
+  $termOutput.scrollTop = $termOutput.scrollHeight;
+}
+
+async function runTerminalCommand(command) {
+  if (!command.trim()) return;
+  $termInput.value = '';
+  openTerminal();
+  // Show command
+  const cmdLine = document.createElement('div');
+  cmdLine.className = 'term-line term-cmd';
+  cmdLine.textContent = '$ ' + command;
+  $termOutput.appendChild(cmdLine);
+
+  try {
+    const resp = await fetch('/terminal/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command }),
+    });
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        try {
+          const ev = JSON.parse(line.slice(6));
+          if (ev.type === 'output') {
+            const el = document.createElement('div');
+            el.className = 'term-line term-out';
+            el.textContent = ev.text.replace(/\n$/, '');
+            $termOutput.appendChild(el);
+            $termOutput.scrollTop = $termOutput.scrollHeight;
+          } else if (ev.type === 'done') {
+            const el = document.createElement('div');
+            el.className = `term-line ${ev.code === 0 ? 'term-done-ok' : 'term-done-err'}`;
+            el.textContent = ev.code === 0 ? '✓ Terminé' : `✗ Code: ${ev.code}`;
+            $termOutput.appendChild(el);
+            $termOutput.scrollTop = $termOutput.scrollHeight;
+          } else if (ev.type === 'error') {
+            const el = document.createElement('div');
+            el.className = 'term-line term-err';
+            el.textContent = ev.text;
+            $termOutput.appendChild(el);
+          }
+        } catch {}
+      }
+    }
+  } catch (e) {
+    const el = document.createElement('div');
+    el.className = 'term-line term-err';
+    el.textContent = 'Erreur : ' + e.message;
+    $termOutput.appendChild(el);
+  }
+}
+
+document.getElementById('btn-terminal-toggle').addEventListener('click', () => {
+  if ($termPanel.classList.contains('open')) closeTerminal();
+  else openTerminal();
+});
+
+document.getElementById('btn-terminal-close').addEventListener('click', closeTerminal);
+
+document.getElementById('btn-terminal-clear').addEventListener('click', () => {
+  $termOutput.innerHTML = '';
+});
+
+$termInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter') runTerminalCommand($termInput.value);
+});
+
+document.getElementById('btn-terminal-run').addEventListener('click', () => {
+  runTerminalCommand($termInput.value);
 });
 
 init();
