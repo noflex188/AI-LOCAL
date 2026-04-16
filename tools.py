@@ -265,7 +265,11 @@ def delete_file(path: str) -> str:
 def pip_install(packages) -> str:
     """Install Python packages via pip into the current virtual environment."""
     if not packages:
-        return "Error: no packages specified. Provide a list of package names, e.g. ['pygame', 'numpy']."
+        return (
+            "Error: packages list is empty. "
+            "Retry with the actual package names, e.g. pip_install(packages=['pygame']) "
+            "or pip_install(packages=['pygame', 'numpy'])."
+        )
     if isinstance(packages, str):
         pkg_str = packages
     elif isinstance(packages, list):

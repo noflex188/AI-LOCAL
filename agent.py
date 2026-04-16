@@ -209,6 +209,92 @@ def _guess_filename(history: list, lang: str, index: int = 0) -> str:
     return f"script{suffix}.{ext}"
 
 
+def _smart_infer_path(history: list, content: str, ext: str) -> str:
+    """
+    Infère intelligemment le nom de fichier à partir du contenu du code et
+    de l'historique de la conversation. Utilisé quand le modèle oublie le path.
+
+    Niveaux de détection (ordre de priorité) :
+    1. Commentaire de nom de fichier dans le code  (#  snake.py)
+    2. Nom de classe dans le code  (class SnakeGame → snake_game.py)
+    3. Titre de fenêtre pygame/tkinter  (set_caption("Snake") → snake.py)
+    4. Mention explicite du fichier dans l'historique  (snake.py)
+    5. Nom de projet dans le message utilisateur  ("jeu snake" → snake.py)
+    6. Fallback → script.ext
+    """
+    import re
+
+    # ── Niveau 1 : commentaire de fichier dans les premières lignes ──
+    for line in content.split('\n')[:8]:
+        m = re.search(r'[#/]{1,2}\s*([\w\-]+\.' + re.escape(ext) + r')', line)
+        if m:
+            return m.group(1)
+
+    # ── Niveau 2 : nom de classe principal → snake_case ──
+    for line in content.split('\n')[:30]:
+        m = re.match(r'\s*class\s+([A-Z]\w+)', line)
+        if m:
+            class_name = m.group(1)
+            # CamelCase → snake_case
+            snake = re.sub(r'(?<!^)(?=[A-Z])', '_', class_name).lower()
+            return f"{snake}.{ext}"
+
+    # ── Niveau 3 : titre de fenêtre (pygame/tkinter/etc.) ──
+    for line in content.split('\n'):
+        for pat in [
+            r'set_caption\s*\(\s*["\']([^"\']{2,30})["\']',
+            r'title\s*\(\s*["\']([^"\']{2,30})["\']',
+            r'wm_title\s*\(\s*["\']([^"\']{2,30})["\']',
+        ]:
+            m = re.search(pat, line, re.IGNORECASE)
+            if m:
+                name = m.group(1).lower()
+                name = re.sub(r'[^a-z0-9]+', '_', name).strip('_')
+                if name:
+                    return f"{name}.{ext}"
+
+    # ── Niveau 4 : fichier explicitement mentionné dans l'historique ──
+    for msg in reversed(history[-12:]):
+        text = msg.get("content", "")
+        if not isinstance(text, str):
+            continue
+        matches = re.findall(r'\b([\w\-]+\.' + re.escape(ext) + r')\b', text, re.IGNORECASE)
+        matches += re.findall(r'`([\w\-/]+\.' + re.escape(ext) + r')`', text, re.IGNORECASE)
+        if matches:
+            return matches[-1]
+
+    # ── Niveau 5 : nom de projet dans les messages utilisateur ──
+    _STOP_WORDS = {
+        'le', 'la', 'les', 'un', 'une', 'des', 'du', 'de', 'en', 'et', 'ou',
+        'est', 'pour', 'avec', 'dans', 'sur', 'qui', 'que', 'tout', 'tous',
+        'aussi', 'mais', 'bien', 'bon', 'gros', 'beau', 'joli', 'super',
+        'petit', 'grand', 'simple', 'propre', 'clean', 'nice', 'cool',
+        'python', 'javascript', 'html', 'css', 'json', 'sql',
+    }
+    for msg in reversed(history):
+        if msg.get("role") != "user":
+            continue
+        text = msg.get("content", "")
+        if not isinstance(text, str):
+            continue
+        lower = text.lower()
+
+        # "jeu X", "game X", "app X", "projet X", "programme X", "un X"
+        patterns = [
+            r'(?:jeu|game|app(?:lication)?|projet|programme|logiciel|script|site|serveur|outil)\s+["\']?([\w]{3,})',
+            r'(?:crée|fais|créer|faire|écris|écrire|code|coder)\s+(?:moi\s+)?(?:un|une|le|la|mon|ma)?\s*(?:petit\s+|beau\s+|joli\s+)?(?:jeu\s+|app\s+|programme\s+)?([\w]{4,})',
+            r'\bun\s+([\w]{4,})\b',
+        ]
+        for pat in patterns:
+            m = re.search(pat, lower)
+            if m:
+                name = m.group(1).strip()
+                if name not in _STOP_WORDS and len(name) >= 3:
+                    return f"{name}.{ext}"
+
+    return f"script.{ext}"
+
+
 def _looks_like_tool_call(code: str) -> bool:
     """Vérifie si une chaîne est un appel d'outil JSON {"name": ..., "arguments": ...}."""
     try:
@@ -524,20 +610,23 @@ class Agent:
                     # ── Auto-inférence du chemin si create_file appelé sans path ──
                     if name == "create_file" and "path" not in args and "content" in args:
                         import os as _os
-                        content_preview = args["content"][:300].lower()
+                        code = args["content"]
+                        code_low = code[:400].lower()
                         # Déduire l'extension depuis le contenu
-                        if "import pygame" in content_preview or "pygame.init" in content_preview:
+                        if any(kw in code_low for kw in ("import pygame", "pygame.init", "pygame.display")):
                             _ext = "py"
-                        elif "import flask" in content_preview or "from flask" in content_preview:
+                        elif any(kw in code_low for kw in ("from flask", "import flask", "from fastapi", "import fastapi")):
                             _ext = "py"
-                        elif "<!doctype html" in content_preview or "<html" in content_preview:
+                        elif "<!doctype html" in code_low or "<html" in code_low:
                             _ext = "html"
-                        elif content_preview.strip().startswith("{") or content_preview.strip().startswith("["):
+                        elif code_low.strip().startswith("{") or code_low.strip().startswith("["):
                             _ext = "json"
+                        elif "import " in code_low or "def " in code_low or "class " in code_low:
+                            _ext = "py"
                         else:
                             _ext = "py"
-                        # Chercher un nom de fichier mentionné dans l'historique récent
-                        guessed = _guess_filename(self.history, _ext)
+                        # Inférence intelligente du nom de fichier
+                        guessed = _smart_infer_path(self.history, code, _ext)
                         wpath = ws.get_workspace()
                         if wpath:
                             guessed = _os.path.join(wpath, guessed)
