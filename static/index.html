@@ -2233,7 +2233,11 @@ let modelsCache  = null;
 
 async function loadModels() {
   try {
-    modelsCache = await fetch('/models').then(r => r.json());
+    const data = await fetch('/models').then(r => r.json());
+    modelsCache = data.models ?? data; // compat ancien format
+    if (data.active && !currentModel) {
+      currentModel = data.active;
+    }
     renderModelDropdown(modelsCache);
   } catch {}
 }

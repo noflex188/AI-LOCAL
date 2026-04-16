@@ -29,8 +29,14 @@ _stop_event = threading.Event()
 
 
 @app.on_event("startup")
-def _restore_workspace():
-    """Restaure le workspace actif au redémarrage du serveur."""
+def _restore_state():
+    """Restaure le modèle et le workspace actifs au redémarrage du serveur."""
+    # Restaurer le modèle sélectionné
+    saved_model = ws.load_model()
+    if saved_model:
+        agent.set_model(saved_model)
+
+    # Restaurer le workspace
     last = ws.load_state()
     if not last or not os.path.isdir(last):
         return
@@ -450,7 +456,7 @@ def get_models():
     for s in all_suggested:
         if s not in installed_set:
             result.append({"id": s, "installed": False, "code_only": s in CODE_MODELS})
-    return JSONResponse(result)
+    return JSONResponse({"models": result, "active": agent.model})
 
 class ModelSelectRequest(BaseModel):
     model: str
@@ -458,6 +464,7 @@ class ModelSelectRequest(BaseModel):
 @app.post("/models/select")
 def select_model(body: ModelSelectRequest):
     agent.set_model(body.model)
+    ws.save_model(body.model)
     return JSONResponse({"ok": True, "model": body.model})
 
 @app.post("/models/pull")

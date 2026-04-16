@@ -13,22 +13,42 @@ _workspace: str | None = None
 _STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "memory", "state.json")
 
 
-def save_state(path: str):
+def _read_state() -> dict:
+    import json
+    if not os.path.exists(_STATE_FILE):
+        return {}
+    try:
+        with open(_STATE_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _write_state(data: dict):
     import json
     os.makedirs(os.path.dirname(_STATE_FILE), exist_ok=True)
     with open(_STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump({"workspace": path}, f)
+        json.dump(data, f)
+
+
+def save_state(path: str):
+    state = _read_state()
+    state["workspace"] = path
+    _write_state(state)
 
 
 def load_state() -> str | None:
-    import json
-    if not os.path.exists(_STATE_FILE):
-        return None
-    try:
-        with open(_STATE_FILE, encoding="utf-8") as f:
-            return json.load(f).get("workspace")
-    except Exception:
-        return None
+    return _read_state().get("workspace")
+
+
+def save_model(model: str):
+    state = _read_state()
+    state["model"] = model
+    _write_state(state)
+
+
+def load_model() -> str | None:
+    return _read_state().get("model")
 
 
 def clear_state():
