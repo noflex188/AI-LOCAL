@@ -209,87 +209,77 @@ def _guess_filename(history: list, lang: str, index: int = 0) -> str:
     return f"script{suffix}.{ext}"
 
 
-def _smart_infer_path(history: list, content: str, ext: str) -> str:
+def _smart_infer_path(history: list, code_content: str, ext: str,
+                      model_text: str = "") -> str:
     """
-    Infère intelligemment le nom de fichier à partir du contenu du code et
-    de l'historique de la conversation. Utilisé quand le modèle oublie le path.
+    Infère le nom du fichier cible quand le modèle oublie de passer 'path'.
 
-    Niveaux de détection (ordre de priorité) :
-    1. Commentaire de nom de fichier dans le code  (#  snake.py)
-    2. Nom de classe dans le code  (class SnakeGame → snake_game.py)
-    3. Titre de fenêtre pygame/tkinter  (set_caption("Snake") → snake.py)
-    4. Mention explicite du fichier dans l'historique  (snake.py)
-    5. Nom de projet dans le message utilisateur  ("jeu snake" → snake.py)
-    6. Fallback → script.ext
+    Ordre de priorité :
+    1. Texte récent du modèle  → il a dit "Je vais créer `snake.py`"
+    2. Messages récents (assistant + user)  → "snake.py" mentionné quelque part
+    3. Commentaire de fichier dans le code  → # snake.py en tête de fichier
+    4. Nom de classe dans le code  → class SnakeGame → snake_game.py
+    5. Titre de fenêtre dans le code  → set_caption("Snake") → snake.py
+    6. Fallback  → script.ext
     """
     import re
 
-    # ── Niveau 1 : commentaire de fichier dans les premières lignes ──
-    for line in content.split('\n')[:8]:
-        m = re.search(r'[#/]{1,2}\s*([\w\-]+\.' + re.escape(ext) + r')', line)
+    _pat_filename = r'([\w][\w\-]*\.' + re.escape(ext) + r')'
+
+    def _first_filename(text: str):
+        """Extrait le premier nom de fichier .ext trouvé dans un texte."""
+        # backtick : `snake.py`
+        m = re.search(r'`' + _pat_filename + r'`', text, re.IGNORECASE)
+        if m:
+            return m.group(1)
+        # quotes : "snake.py" ou 'snake.py'
+        m = re.search(r'["\']' + _pat_filename + r'["\']', text, re.IGNORECASE)
+        if m:
+            return m.group(1)
+        # mot isolé : snake.py (pas en milieu d'une URL)
+        m = re.search(r'(?<![/\\])' + _pat_filename + r'\b', text, re.IGNORECASE)
+        if m:
+            return m.group(1)
+        return None
+
+    # ── 1. Texte que le modèle vient de produire ──────────────────────────────
+    if model_text:
+        found = _first_filename(model_text)
+        if found:
+            return found
+
+    # ── 2. Historique récent (les 15 derniers messages) ──────────────────────
+    for msg in reversed(history[-15:]):
+        text = msg.get("content", "")
+        if not isinstance(text, str):
+            continue
+        found = _first_filename(text)
+        if found:
+            return found
+
+    # ── 3. Commentaire de nom de fichier dans les premières lignes du code ───
+    for line in code_content.split('\n')[:8]:
+        m = re.search(r'[#/]{1,2}\s*' + _pat_filename, line)
         if m:
             return m.group(1)
 
-    # ── Niveau 2 : nom de classe principal → snake_case ──
-    for line in content.split('\n')[:30]:
+    # ── 4. Nom de classe principal → snake_case ───────────────────────────────
+    for line in code_content.split('\n')[:40]:
         m = re.match(r'\s*class\s+([A-Z]\w+)', line)
         if m:
-            class_name = m.group(1)
-            # CamelCase → snake_case
-            snake = re.sub(r'(?<!^)(?=[A-Z])', '_', class_name).lower()
+            snake = re.sub(r'(?<!^)(?=[A-Z])', '_', m.group(1)).lower()
             return f"{snake}.{ext}"
 
-    # ── Niveau 3 : titre de fenêtre (pygame/tkinter/etc.) ──
-    for line in content.split('\n'):
+    # ── 5. Titre de fenêtre (pygame / tkinter / etc.) ─────────────────────────
+    for line in code_content.split('\n'):
         for pat in [
             r'set_caption\s*\(\s*["\']([^"\']{2,30})["\']',
-            r'title\s*\(\s*["\']([^"\']{2,30})["\']',
-            r'wm_title\s*\(\s*["\']([^"\']{2,30})["\']',
+            r'\.title\s*\(\s*["\']([^"\']{2,30})["\']',
         ]:
             m = re.search(pat, line, re.IGNORECASE)
             if m:
-                name = m.group(1).lower()
-                name = re.sub(r'[^a-z0-9]+', '_', name).strip('_')
+                name = re.sub(r'[^a-z0-9]+', '_', m.group(1).lower()).strip('_')
                 if name:
-                    return f"{name}.{ext}"
-
-    # ── Niveau 4 : fichier explicitement mentionné dans l'historique ──
-    for msg in reversed(history[-12:]):
-        text = msg.get("content", "")
-        if not isinstance(text, str):
-            continue
-        matches = re.findall(r'\b([\w\-]+\.' + re.escape(ext) + r')\b', text, re.IGNORECASE)
-        matches += re.findall(r'`([\w\-/]+\.' + re.escape(ext) + r')`', text, re.IGNORECASE)
-        if matches:
-            return matches[-1]
-
-    # ── Niveau 5 : nom de projet dans les messages utilisateur ──
-    _STOP_WORDS = {
-        'le', 'la', 'les', 'un', 'une', 'des', 'du', 'de', 'en', 'et', 'ou',
-        'est', 'pour', 'avec', 'dans', 'sur', 'qui', 'que', 'tout', 'tous',
-        'aussi', 'mais', 'bien', 'bon', 'gros', 'beau', 'joli', 'super',
-        'petit', 'grand', 'simple', 'propre', 'clean', 'nice', 'cool',
-        'python', 'javascript', 'html', 'css', 'json', 'sql',
-    }
-    for msg in reversed(history):
-        if msg.get("role") != "user":
-            continue
-        text = msg.get("content", "")
-        if not isinstance(text, str):
-            continue
-        lower = text.lower()
-
-        # "jeu X", "game X", "app X", "projet X", "programme X", "un X"
-        patterns = [
-            r'(?:jeu|game|app(?:lication)?|projet|programme|logiciel|script|site|serveur|outil)\s+["\']?([\w]{3,})',
-            r'(?:crée|fais|créer|faire|écris|écrire|code|coder)\s+(?:moi\s+)?(?:un|une|le|la|mon|ma)?\s*(?:petit\s+|beau\s+|joli\s+)?(?:jeu\s+|app\s+|programme\s+)?([\w]{4,})',
-            r'\bun\s+([\w]{4,})\b',
-        ]
-        for pat in patterns:
-            m = re.search(pat, lower)
-            if m:
-                name = m.group(1).strip()
-                if name not in _STOP_WORDS and len(name) >= 3:
                     return f"{name}.{ext}"
 
     return f"script.{ext}"
@@ -626,7 +616,8 @@ class Agent:
                         else:
                             _ext = "py"
                         # Inférence intelligente du nom de fichier
-                        guessed = _smart_infer_path(self.history, code, _ext)
+                        # On passe aussi le texte courant du modèle (il y a dit le nom)
+                        guessed = _smart_infer_path(self.history, code, _ext, model_text=content)
                         wpath = ws.get_workspace()
                         if wpath:
                             guessed = _os.path.join(wpath, guessed)
