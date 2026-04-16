@@ -415,12 +415,16 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "create_file",
-            "description": "Create or overwrite a file with the given content. Use this to write any code or text file.",
+            "description": (
+                "Create or overwrite a file with the given content. "
+                "BOTH 'path' AND 'content' are REQUIRED. "
+                "path must be the filename, e.g. 'snake.py' or 'src/app.py'."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path":    {"type": "string", "description": "File path, e.g. 'src/app.py'"},
-                    "content": {"type": "string", "description": "Full content of the file"},
+                    "path":    {"type": "string", "description": "REQUIRED — File path, e.g. 'snake.py' or 'src/app.py'. Never omit this."},
+                    "content": {"type": "string", "description": "REQUIRED — Full content of the file"},
                 },
                 "required": ["path", "content"],
             },

@@ -521,6 +521,29 @@ class Agent:
                             })
                             continue
 
+                    # ── Auto-inférence du chemin si create_file appelé sans path ──
+                    if name == "create_file" and "path" not in args and "content" in args:
+                        import os as _os
+                        content_preview = args["content"][:300].lower()
+                        # Déduire l'extension depuis le contenu
+                        if "import pygame" in content_preview or "pygame.init" in content_preview:
+                            _ext = "py"
+                        elif "import flask" in content_preview or "from flask" in content_preview:
+                            _ext = "py"
+                        elif "<!doctype html" in content_preview or "<html" in content_preview:
+                            _ext = "html"
+                        elif content_preview.strip().startswith("{") or content_preview.strip().startswith("["):
+                            _ext = "json"
+                        else:
+                            _ext = "py"
+                        # Chercher un nom de fichier mentionné dans l'historique récent
+                        guessed = _guess_filename(self.history, _ext)
+                        wpath = ws.get_workspace()
+                        if wpath:
+                            guessed = _os.path.join(wpath, guessed)
+                        args["path"] = guessed
+                        yield {"type": "token", "content": f"\n> 📁 Chemin inféré : `{_os.path.basename(guessed)}`\n"}
+
                     yield {"type": "tool_start", "name": name, "args": args}
                     result = call_tool(name, args)
                     if name == "save_memory":
