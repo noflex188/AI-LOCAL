@@ -43,6 +43,21 @@ def _safe_path(path: str) -> str:
 
 # ── File tools ───────────────────────────────────────────────────────────────
 
+def _validate_python(content: str, path: str) -> str | None:
+    """
+    Vérifie la syntaxe Python d'un fichier .py avant de l'écrire.
+    Retourne un message d'erreur si invalide, None si OK.
+    """
+    if not path.endswith(".py"):
+        return None
+    import ast
+    try:
+        ast.parse(content)
+        return None
+    except SyntaxError as e:
+        return f"Syntaxe invalide ligne {e.lineno}: {e.msg}"
+
+
 def _make_diff(old_content: str, new_content: str, path: str) -> str:
     """Compute a unified diff between old and new content."""
     import difflib
@@ -66,6 +81,14 @@ def create_file(path: str, content: str) -> str:
                 old_content = f.read()
         except Exception:
             pass
+    # Validation syntaxe Python avant d'écrire
+    syntax_err = _validate_python(content, path)
+    if syntax_err:
+        return (
+            f"REFUSÉ — {syntax_err}. "
+            f"Le fichier n'a PAS été modifié. Corrige l'erreur de syntaxe d'abord."
+        )
+
     dir_ = os.path.dirname(path)
     if dir_:
         os.makedirs(dir_, exist_ok=True)
@@ -160,6 +183,13 @@ def patch_file(path: str, old: str, new: str) -> str:
 
     result, info = _smart_replace(content, old, new)
     if result is not None:
+        # Validation syntaxe Python avant d'écrire
+        syntax_err = _validate_python(result, path)
+        if syntax_err:
+            return (
+                f"REFUSÉ — {syntax_err}. "
+                f"Le patch n'a PAS été appliqué. Corrige l'erreur de syntaxe dans ton bloc REPLACE."
+            )
         with open(path, "w", encoding="utf-8") as f:
             f.write(result)
         diff = _make_diff(content, result, path)

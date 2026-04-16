@@ -66,7 +66,7 @@ SYSTEM_PROMPT_BASE = """Tu es un assistant IA personnel, intelligent, direct et 
 Quand un workspace est ouvert, tu AGIS directement sur les fichiers. Tu ne montres jamais du code sans l'appliquer.
 
 ### ⚠️ SÉCURITÉ : tous les chemins de fichiers sont RELATIFS au dossier du projet.
-- Écris `script.py`, pas `C:/Users\...\script.py`
+- Écris `script.py`, pas `C:/Users/.../script.py`
 - Écris `src/app.py`, pas un chemin absolu
 - Tu n'as accès qu'au dossier du projet ouvert, rien d'autre.
 
@@ -79,8 +79,8 @@ print("hello")
 
 ### MODIFIER UN FICHIER EXISTANT (OBLIGATOIRE : SEARCH/REPLACE)
 **Ne JAMAIS réécrire un fichier entier pour changer quelques lignes.**
-1. Lis d'abord le fichier avec `read_file`
-2. Utilise SEARCH/REPLACE pour changer uniquement ce qui doit l'être :
+1. Lis d'abord le fichier avec `read_file` (obligatoire si tu ne connais pas le contenu exact)
+2. Utilise SEARCH/REPLACE pour changer UNIQUEMENT ce qui doit l'être :
 
 fichier.py
 <<<<<<< SEARCH
@@ -89,11 +89,15 @@ fichier.py
     nouveau_code()
 >>>>>>> REPLACE
 
-Tu peux enchaîner plusieurs blocs SEARCH/REPLACE dans le même message.
-Le matching est intelligent : petites différences d'indentation tolérées.
+### ⚠️ RÈGLES STRICTES — SEARCH/REPLACE
+- **MAX 40 lignes par bloc SEARCH** — si c'est plus grand, découpe en plusieurs petits blocs ciblés
+- **Un bloc = une modification précise** : une fonction, un paramètre, une ligne — pas une section entière du fichier
+- **NE MODIFIE QUE CE QUI EST DEMANDÉ** — n'optimise pas, ne réorganise pas, ne renomme pas le code non concerné
+- **Plusieurs petits SEARCH/REPLACE > un gros** : préfère 3 blocs de 10 lignes à un seul de 30
+- Le matching tolère les légères différences d'indentation
 
 **Quand utiliser ```lang:fichier pour un fichier existant ?**
-→ UNIQUEMENT si tu réécris plus de 80% du fichier, ou si c'est un petit fichier (< 30 lignes).
+→ UNIQUEMENT si le fichier fait moins de 50 lignes au total ET que tu dois tout réécrire.
 
 ### SUPPRIMER UN FICHIER → `delete_file`
 ### EXÉCUTER UNE COMMANDE → `run_command`
@@ -115,7 +119,7 @@ Le matching est intelligent : petites différences d'indentation tolérées.
 > >>>>>>> REPLACE
 
 ❌ MAUVAIS — chemin absolu :
-> ```python:C:/Users\test\script.py
+> ```python:C:/Users/test/script.py
 
 ✅ BON — chemin relatif :
 > ```python:script.py
@@ -124,6 +128,7 @@ Le matching est intelligent : petites différences d'indentation tolérées.
 - Ne montre JAMAIS du code brut sans le format `lang:chemin` ou SEARCH/REPLACE
 - AGIS directement : crée, modifie, exécute
 - **Seule exception** : si l'utilisateur dit "montre-moi", "explique-moi" ou demande un exemple théorique
+- Un bloc de code sans `lang:chemin` ne sera PAS appliqué automatiquement — utilise TOUJOURS le format avec chemin
 
 ## Avant d'agir : clarifier si nécessaire
 Si une demande manque de contexte (objectif flou, stack non précisée, etc.), **pose d'abord des questions ciblées**.
@@ -469,22 +474,9 @@ class Agent:
                                 names = ", ".join(f"`{n}`" for n in created)
                                 yield {"type": "token", "content": f"\n\n📝 Fichier(s) créé(s) : {names}\n"}
 
-                        # ── Priorité 3 : blocs de code bruts → création directe (pas de retry) ──
-                        elif regular_blocks:
-                            created = []
-                            for i, b in enumerate(regular_blocks):
-                                filename = _guess_filename(self.history, b["lang"], i)
-                                wpath = ws.get_workspace()
-                                if wpath:
-                                    import os
-                                    filename = os.path.join(wpath, filename)
-                                result = call_tool("create_file", {"path": filename, "content": b["code"]})
-                                created.append(filename)
-                                self.history.append({"role": "tool", "tool_call_id": f"force_{i}", "content": result})
-                                yield {"type": "tool_start", "name": "create_file", "args": {"path": filename}}
-                                yield {"type": "tool_end", "name": "create_file", "result": result}
-                            names = ", ".join(f"`{n}`" for n in created)
-                            yield {"type": "token", "content": f"\n\n📝 Fichier(s) créé(s) : {names}\n"}
+                        # Priorité 3 supprimée : les blocs de code sans ``lang:chemin`` ne sont
+                        # plus auto-appliqués — cela causait des écrasements de fichiers accidentels
+                        # quand le modèle donnait un "exemple" ou une "version finale".
 
                 self._save()
                 yield {"type": "conv_meta", "conv": self.current_conv}
@@ -539,46 +531,14 @@ class Agent:
                             recently_read.append(fpath)
                         read_counts[fpath] = read_counts.get(fpath, 0) + 1
                         if read_counts[fpath] >= 2:
-                            # Le modèle boucle → on prend le relais
-                            # On demande au modèle de générer le fichier complet modifié
-                            yield {"type": "tool_end", "name": name, "result": result[:600]}
-                            self.history.append({"role": "tool", "tool_call_id": call_id, "content": result})
-
-                            # Récupérer la dernière demande utilisateur
-                            user_req = next(
-                                (m["content"] for m in reversed(self.history)
-                                 if m.get("role") == "user" and isinstance(m.get("content"), str)
-                                 and "STOP" not in m["content"] and "bloc" not in m["content"]),
-                                "appliquer les modifications demandées"
+                            # Le modèle relit le même fichier sans le modifier → l'inciter à agir
+                            hint = (
+                                "\n\n⚠️ [SYSTÈME] Tu as lu ce fichier plusieurs fois sans le modifier. "
+                                "Applique maintenant les changements avec des blocs SEARCH/REPLACE ciblés "
+                                f"(max {40} lignes par bloc SEARCH). Ne réécris PAS le fichier entier."
                             )
-                            # Lire le contenu actuel
-                            with open(fpath, "r", encoding="utf-8") as _f:
-                                current = _f.read()
-
-                            yield {"type": "token", "content": "\n\n> ⚙️ Application directe des modifications…\n\n"}
-
-                            # Appel ciblé : génère uniquement le contenu du fichier
-                            resp = ollama.chat(
-                                model=self.model,
-                                messages=[
-                                    {"role": "system", "content": "Tu es un expert en code. Réponds UNIQUEMENT avec le contenu du fichier demandé, sans explication, sans balises markdown, sans ```"},
-                                    {"role": "user", "content": f"Voici le contenu actuel de `{fpath}` :\n\n{current}\n\nModification demandée : {user_req}\n\nÉcris le fichier complet avec la modification appliquée. Réponds uniquement avec le contenu du fichier, rien d'autre."},
-                                ],
-                                stream=False,
-                            )
-                            new_content = resp.message.content.strip()
-                            # Nettoyer les éventuelles balises markdown résiduelles
-                            import re as _re
-                            new_content = _re.sub(r'^```[\w]*\n?', '', new_content)
-                            new_content = _re.sub(r'\n?```$', '', new_content)
-
-                            write_result = call_tool("create_file", {"path": fpath, "content": new_content})
-                            yield {"type": "tool_start", "name": "create_file", "args": {"path": fpath}}
-                            yield {"type": "tool_end", "name": "create_file", "result": write_result}
-                            self.history.append({"role": "assistant", "content": f"Fichier `{fpath}` mis à jour."})
-                            self._save()
-                            yield {"type": "conv_meta", "conv": self.current_conv}
-                            return
+                            result = result + hint
+                            read_counts[fpath] = 0  # reset pour éviter une boucle infinie
 
                     elif name in ("patch_file", "patch_file_lines", "create_file"):
                         read_counts.clear()   # reset après une modification

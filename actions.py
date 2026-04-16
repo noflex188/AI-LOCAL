@@ -15,6 +15,9 @@ from tools import call_tool
 # Pattern pour les chemins de fichiers (Windows absolu + relatif)
 _PATH_PAT = r'((?:[A-Za-z]:[/\\])?(?:[\w.\-]+[/\\])*[\w.\-]+\.[\w]+)'
 
+# Taille maximale d'un bloc SEARCH (lignes). Au-delà = quasi-réécriture → refusé.
+MAX_SEARCH_LINES = 40
+
 # Extension → langages code block
 _EXT_LANG = {
     "py": "python", "js": "javascript", "ts": "typescript", "ps1": "powershell",
@@ -90,41 +93,29 @@ def parse_actions(text: str, workspace: str = "", recently_read: list[str] = Non
     for m in re.finditer(sr_pattern, text):
         if _overlaps(m.start(), m.end()):
             continue
+        search_text = m.group(2)
+        search_lines = search_text.count('\n') + 1
         used.append((m.start(), m.end()))
+        if search_lines > MAX_SEARCH_LINES:
+            # Bloc SEARCH trop grand = réécriture déguisée → on le rejette
+            actions.append({
+                "type": "too_large",
+                "path": _resolve(m.group(1)),
+                "lines": search_lines,
+            })
+            continue
         actions.append({
             "type": "edit",
             "path": _resolve(m.group(1)),
-            "search": m.group(2),
+            "search": search_text,
             "replace": m.group(3),
         })
 
-    # ── 3. Code blocks sans chemin → auto-détection via fichiers récemment lus ──
-    if recently_read:
-        for m in re.finditer(r'```(\w+)\n([\s\S]*?)```', text):
-            if _overlaps(m.start(), m.end()):
-                continue
-            lang = m.group(1).lower()
-            code = m.group(2)
-            # Ignorer les blocs JSON qui sont des faux tool calls
-            if lang in ("json", ""):
-                continue
-            # Ignorer les blocs très courts (probablement des exemples inline)
-            if code.count("\n") < 3:
-                continue
-            # Trouver le fichier récemment lu avec la même extension
-            ext = _LANG_EXT.get(lang, lang)
-            target = None
-            for fpath in reversed(recently_read):
-                if fpath.lower().endswith(f".{ext}"):
-                    target = fpath
-                    break
-            if target:
-                used.append((m.start(), m.end()))
-                actions.append({
-                    "type": "create",
-                    "path": target,
-                    "content": code,
-                })
+    # Note : l'auto-détection des blocs sans chemin (ancienne priorité 3) a été
+    # supprimée — elle causait des écrasements accidentels de fichiers quand le
+    # modèle produisait un "exemple de code" ou une "version finale" sans
+    # spécifier explicitement de fichier cible.
+    # Le modèle DOIT utiliser ```lang:chemin``` pour créer/réécrire un fichier.
 
     return actions
 
@@ -149,6 +140,19 @@ def execute_actions(actions: list[dict]) -> list[dict]:
                 "old": action["search"],
                 "new": action["replace"],
             })
+            results.append({
+                "name": "patch_file",
+                "args": {"path": action["path"]},
+                "result": r,
+            })
+        elif action["type"] == "too_large":
+            name = os.path.basename(action["path"])
+            r = (
+                f"REFUSÉ — bloc SEARCH trop grand ({action['lines']} lignes, max {MAX_SEARCH_LINES}). "
+                f"Découpe la modification en plusieurs petits blocs SEARCH/REPLACE ciblés "
+                f"(une fonction ou une section à la fois), ou utilise ```lang:{name} si tu dois "
+                f"réécrire le fichier entièrement (fichier court uniquement)."
+            )
             results.append({
                 "name": "patch_file",
                 "args": {"path": action["path"]},
