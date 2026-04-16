@@ -22,5 +22,14 @@ if errorlevel 1 (
     exit /b 1
 )
 
-:: Lancer l'assistant
-python main.py
+:: Libérer le port 8000 si déjà occupé par une instance précédente
+echo Vérification du port 8000...
+for /f "tokens=5" %%a in ('netstat -aon 2^>nul ^| findstr ":8000 "') do (
+    taskkill /F /PID %%a >nul 2>&1
+)
+
+:: Lancer le serveur web
+echo Démarrage du serveur...
+echo Interface disponible sur : http://localhost:8000
+echo.
+python server.py
