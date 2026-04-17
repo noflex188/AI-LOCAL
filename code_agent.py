@@ -12,11 +12,16 @@ Architecture :
 import json
 import os
 import re
+import time
 import ollama
 
 from tools import TOOL_SCHEMAS, call_tool
 from actions import parse_actions, execute_actions
 from confirmation import confirm_manager, SENSITIVE_TOOLS
+from dev_logger import (
+    log, log_code_session_start, log_llm_call, log_llm_response,
+    log_actions_detected, log_action_result, log_tool_call, log_error,
+)
 import memory as mem
 
 # ── Outils autorisés en mode code agent (pas de file tools → format texte) ──
@@ -357,7 +362,6 @@ def stream_code(agent_self, user_message: str, attachments: list):
 
     wpath = ws.get_workspace()
     if not wpath:
-        # Sécurité : ne devrait pas arriver, mais on délègue quand même
         return
 
     # ── 1. Construire le message utilisateur (avec pièces jointes) ────────────
@@ -368,6 +372,9 @@ def stream_code(agent_self, user_message: str, attachments: list):
     ctx_files  = get_context_files(wpath, user_message, agent_self.history)
     file_ctx   = format_file_context(ctx_files, wpath)
     sys_prompt = build_code_system_prompt(wpath, file_ctx)
+
+    # LOG : démarrage de session
+    log_code_session_start(agent_self.model, wpath, user_message, ctx_files)
 
     # On injecte dans le premier message (system) de l'historique
     if agent_self.history and agent_self.history[0].get("role") == "system":
@@ -389,9 +396,20 @@ def stream_code(agent_self, user_message: str, attachments: list):
             return
 
         # ── Appel Ollama ──────────────────────────────────────────────────────
+        trimmed = _trimmed_history(agent_self.history)
+        prompt_chars = sum(len(str(m.get("content", ""))) for m in trimmed)
+        log_llm_call(
+            iteration   = loop_iterations,
+            model       = agent_self.model,
+            n_messages  = len(trimmed),
+            n_tools     = len(CODE_TOOL_SCHEMAS),
+            prompt_chars= prompt_chars,
+        )
+
+        t0 = time.monotonic()
         stream = ollama.chat(
             model    = agent_self.model,
-            messages = _trimmed_history(agent_self.history),
+            messages = trimmed,
             tools    = CODE_TOOL_SCHEMAS,
             stream   = True,
         )
@@ -407,6 +425,9 @@ def stream_code(agent_self, user_message: str, attachments: list):
                 yield {"type": "token", "content": chunk_msg.content}
                 content += chunk_msg.content
 
+        duration_ms = int((time.monotonic() - t0) * 1000)
+        log_llm_response(content, tool_calls, duration_ms)
+
         # ── Pas de tool call API → actions texte ─────────────────────────────
         if not tool_calls:
             agent_self.history.append({"role": "assistant", "content": content})
@@ -414,6 +435,7 @@ def stream_code(agent_self, user_message: str, attachments: list):
             # Détecter et exécuter les actions texte (```lang:path + SEARCH/REPLACE)
             text_actions = parse_actions(content, wpath, recently_read)
             if text_actions:
+                log_actions_detected(text_actions, wpath)
                 yield {"type": "token", "content": "\n\n> ⚙️ Application des modifications…\n\n"}
                 results = execute_actions(text_actions)
                 for i, r in enumerate(results):
@@ -424,6 +446,10 @@ def stream_code(agent_self, user_message: str, attachments: list):
                         "tool_call_id": f"action_{i}",
                         "content": r["result"],
                     })
+                    # LOG : résultat de chaque action
+                    target = r["args"].get("path") or r["args"].get("command", "?")
+                    log_action_result(r["name"], target, r["result"], wpath)
+
                 paths = [r["args"]["path"] for r in results if "path" in r["args"]]
                 if paths:
                     names = ", ".join(f"`{os.path.relpath(p, wpath).replace(chr(92), '/')}`" for p in paths)
@@ -432,7 +458,6 @@ def stream_code(agent_self, user_message: str, attachments: list):
                 # Si des actions ont échoué, relancer pour laisser le modèle corriger
                 failed = [r for r in results if r["result"].startswith(("Error", "REFUSÉ"))]
                 if failed and loop_iterations < MAX_ITERATIONS:
-                    # Ajouter un hint et relancer
                     hint_lines = []
                     for r in failed:
                         hint_lines.append(f"- `{r['name']}` : {r['result'][:200]}")
@@ -440,11 +465,20 @@ def stream_code(agent_self, user_message: str, attachments: list):
                         "\n\n[SYSTÈME] Certaines modifications ont échoué. "
                         "Corrige les erreurs indiquées :\n" + "\n".join(hint_lines)
                     )
-                    agent_self.history.append({
-                        "role": "user",
-                        "content": hint,
+                    agent_self.history.append({"role": "user", "content": hint})
+                    log("code_agent.retry", {
+                        "reason": "actions_failed",
+                        "n_failed": len(failed),
+                        "hint": hint[:300],
                     })
                     continue
+
+            else:
+                # Aucune action détectée — le modèle a produit du texte pur
+                log("code_agent.no_actions", {
+                    "content_preview": content[:200],
+                    "iteration": loop_iterations,
+                })
 
             agent_self._save()
             yield {"type": "conv_meta", "conv": agent_self.current_conv}
@@ -528,7 +562,10 @@ def stream_code(agent_self, user_message: str, attachments: list):
                         continue
 
                 yield {"type": "tool_start", "name": name, "args": args}
+                t_tool = time.monotonic()
                 result = call_tool(name, args)
+                tool_ms = int((time.monotonic() - t_tool) * 1000)
+                log_tool_call(name, args, result, tool_ms)
 
                 # Mise à jour du system prompt si save_memory
                 if name == "save_memory":
@@ -555,6 +592,7 @@ def stream_code(agent_self, user_message: str, attachments: list):
 
             except Exception as e:
                 result = f"Tool error: {e}"
+                log_error("tool_call", str(e), {"tool": name, "args": str(args)[:200]})
                 yield {"type": "tool_end", "name": name, "result": result}
 
             agent_self.history.append({
