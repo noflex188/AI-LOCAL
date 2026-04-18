@@ -476,35 +476,34 @@ def stream_code(agent_self, user_message: str, attachments: list):
                     yield {"type": "token", "content": f"\n\n📝 {names}\n"}
 
                 # ── Décider si on relance le LLM ─────────────────────────
-                _has_failures  = any(_is_error(r["result"]) for r in results)
-                _has_writes    = any(r["name"] in ("create_file", "patch_file")
-                                     for r in results)
-                _only_commands = not _has_writes
+                # Règle simple : on relance UNIQUEMENT en cas d'échec.
+                # Si tout a réussi → on s'arrête. Le texte du modèle déjà
+                # produit (content) est la réponse finale.
+                # Raison : un tour "de confirmation" supplémentaire prend
+                # 5-10 min et confond le modèle (il voit les diffs dans
+                # l'historique et sort des messages incohérents).
+                _has_failures = any(_is_error(r["result"]) for r in results)
 
                 if _has_failures and loop_iterations < MAX_ITERATIONS:
-                    # Des actions ont échoué → le modèle DOIT corriger
+                    # Des actions ont échoué → le modèle doit corriger
+                    failed_details = "\n".join(
+                        f"- {r['name']} `{r['args'].get('path') or r['args'].get('command', '?')}` : {r['result'][:150]}"
+                        for r in results if _is_error(r["result"])
+                    )
                     hint = (
-                        "[SYSTÈME] Certaines actions ont échoué (voir résultats ci-dessus). "
-                        "Analyse les erreurs et corrige directement le problème — "
-                        "modifie le fichier concerné, ne relance pas les mêmes commandes."
+                        f"[SYSTÈME] Échec(s) détecté(s) :\n{failed_details}\n\n"
+                        "Corrige directement le problème. "
+                        "Ne répète pas les mêmes commandes qui ont échoué."
                     )
                     agent_self.history.append({"role": "user", "content": hint})
                     log("code_agent.loop_continue", {
                         "reason": "failures",
                         "n_failed": sum(1 for r in results if _is_error(r["result"])),
+                        "details": failed_details[:300],
                     })
                     continue
 
-                elif _has_writes and loop_iterations < MAX_ITERATIONS:
-                    # Des fichiers ont été modifiés → laisser le modèle confirmer
-                    hint = "[SYSTÈME] Fichiers modifiés (voir diffs ci-dessus). Confirme ou complète."
-                    agent_self.history.append({"role": "user", "content": hint})
-                    log("code_agent.loop_continue", {"reason": "file_writes"})
-                    continue
-
-                # Sinon (commandes réussies, pas d'écriture) → le contenu
-                # du modèle déjà produit EST la réponse finale, on s'arrête.
-                # On NE relance PAS le LLM pour éviter les boucles de "vérification".
+                # Tout a réussi → on s'arrête immédiatement.
 
             else:
                 # Aucune action détectée — le modèle a produit du texte pur → fin
