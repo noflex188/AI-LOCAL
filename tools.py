@@ -305,16 +305,15 @@ def run_command(command: str) -> str:
             env=env,
             cwd=cwd,
         )
-        output = ""
-        if result.stdout:
-            output += result.stdout
-        if result.stderr:
-            output += result.stderr
-        output = output.strip()
+        output = (result.stdout + result.stderr).strip()
         if not output:
             output = f"(exit code {result.returncode}, no output)"
-        elif len(output) > 4000:
-            output = output[:4000] + "\n... (truncated)"
+        else:
+            if len(output) > 4000:
+                output = output[:4000] + "\n... (truncated)"
+            # Préfixer le code de sortie si non-zéro pour permettre la détection d'erreur
+            if result.returncode != 0:
+                output = f"[exit {result.returncode}]\n{output}"
         return output
     except subprocess.TimeoutExpired:
         return "Error: command timed out after 30s"

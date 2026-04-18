@@ -155,9 +155,14 @@ def log_actions_detected(actions: list[dict], workspace: str = ""):
     })
 
 
+def _is_error(result: str) -> bool:
+    prefixes = ("Error", "REFUSÉ", "Tool error", "[exit ", "Traceback")
+    return any(result.startswith(p) for p in prefixes)
+
+
 def log_action_result(action_type: str, path_or_cmd: str,
                        result: str, workspace: str = ""):
-    success = not result.startswith(("Error", "REFUSÉ", "Tool error"))
+    success = not _is_error(result)
     if workspace and os.path.isabs(path_or_cmd):
         try:
             path_or_cmd = os.path.relpath(path_or_cmd, workspace)
@@ -173,7 +178,7 @@ def log_action_result(action_type: str, path_or_cmd: str,
 
 def log_tool_call(name: str, args: dict, result: str, duration_ms: int = 0):
     """Log un appel d'outil API (run_command, pip_install, etc.)."""
-    success = not result.startswith(("Error", "Tool error", "Unknown tool"))
+    success = not _is_error(result) and not result.startswith("Unknown tool")
     # Ne logger que les clés non-sensibles (pas le contenu de fichier)
     safe_args = {k: v for k, v in args.items() if k != "content"}
     log("tool.call", {

@@ -328,6 +328,18 @@ Workspace : `{wpath}`{rag_info}
 
 # ── Helper ────────────────────────────────────────────────────────────────────
 
+def _is_error(result: str) -> bool:
+    """
+    Détecte si le résultat d'une action est une erreur.
+    Couvre : outils fichiers, commandes shell (exit code non-zero),
+    erreurs Python, messages système.
+    """
+    if not result:
+        return False
+    prefixes = ("Error", "REFUSÉ", "Tool error", "[exit ", "Traceback")
+    return any(result.startswith(p) for p in prefixes)
+
+
 def _tool_args(tc, i: int) -> dict:
     """Extrait les arguments d'un tool call Ollama (dict ou JSON string)."""
     return (
@@ -448,36 +460,56 @@ def stream_code(agent_self, user_message: str, attachments: list):
                     })
                     # LOG : résultat de chaque action
                     target = r["args"].get("path") or r["args"].get("command", "?")
-                    log_action_result(r["name"], target, r["result"], wpath)
+                    log_action_result(r["name"], str(target), r["result"], wpath)
+                    if _is_error(r["result"]):
+                        log("code_agent.action_error_detail", {
+                            "iteration": loop_iterations,
+                            "action": r["name"],
+                            "target": str(target)[:200],
+                            "error": r["result"][:400],
+                        }, level="warn")
 
                 paths = [r["args"]["path"] for r in results if "path" in r["args"]]
                 if paths:
                     names = ", ".join(f"`{os.path.relpath(p, wpath).replace(chr(92), '/')}`" for p in paths)
                     yield {"type": "token", "content": f"\n\n📝 {names}\n"}
 
-                # Si des actions ont échoué, relancer pour laisser le modèle corriger
-                failed = [r for r in results if r["result"].startswith(("Error", "REFUSÉ"))]
-                if failed and loop_iterations < MAX_ITERATIONS:
-                    hint_lines = []
-                    for r in failed:
-                        hint_lines.append(f"- `{r['name']}` : {r['result'][:200]}")
-                    hint = (
-                        "\n\n[SYSTÈME] Certaines modifications ont échoué. "
-                        "Corrige les erreurs indiquées :\n" + "\n".join(hint_lines)
-                    )
+                # ── Toujours relancer le LLM après des actions ──────────────
+                # Le modèle doit voir les résultats (sorties de commandes,
+                # erreurs de syntaxe, diffs...) pour décider de la suite.
+                # C'est ici la différence clé avec l'ancienne approche.
+                _has_failures = any(_is_error(r["result"]) for r in results)
+                _has_commands = any(r["name"] == "run_command" for r in results)
+
+                if loop_iterations < MAX_ITERATIONS:
+                    # Ajouter un contexte pour guider le prochain tour
+                    if _has_failures:
+                        hint = (
+                            "[SYSTÈME] Certaines actions ont échoué (voir résultats ci-dessus). "
+                            "Analyse les erreurs et corrige le problème."
+                        )
+                    elif _has_commands:
+                        hint = (
+                            "[SYSTÈME] Commandes exécutées (résultats ci-dessus). "
+                            "Si le problème est résolu, dis-le. Sinon, corrige-le maintenant."
+                        )
+                    else:
+                        hint = "[SYSTÈME] Fichiers modifiés. Vérifie que c'est correct et complète si nécessaire."
+
                     agent_self.history.append({"role": "user", "content": hint})
-                    log("code_agent.retry", {
-                        "reason": "actions_failed",
-                        "n_failed": len(failed),
-                        "hint": hint[:300],
+                    log("code_agent.loop_continue", {
+                        "reason": "after_actions",
+                        "has_failures": _has_failures,
+                        "has_commands": _has_commands,
+                        "n_actions": len(results),
                     })
                     continue
 
             else:
-                # Aucune action détectée — le modèle a produit du texte pur
-                log("code_agent.no_actions", {
-                    "content_preview": content[:200],
+                # Aucune action détectée — le modèle a produit du texte pur → fin
+                log("code_agent.conversation_end", {
                     "iteration": loop_iterations,
+                    "content_preview": content[:200],
                 })
 
             agent_self._save()
