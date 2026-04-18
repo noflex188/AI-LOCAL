@@ -1222,6 +1222,15 @@ const $ctxBar      = document.getElementById('ctx-bar');
 const $anchor      = document.getElementById('anchor');
 const $messagesScroll = document.getElementById('messages-scroll');
 
+// ── Smart auto-scroll ─────────────────────────────────────────────────────────
+// On ne force le scroll vers le bas que si l'utilisateur n'a pas scrollé manuellement.
+// Dès qu'il remonte, on s'arrête. Dès qu'il revient en bas, on reprend.
+let _userScrolledUp = false;
+$messagesScroll.addEventListener('scroll', () => {
+  const distFromBottom = $messagesScroll.scrollHeight - $messagesScroll.scrollTop - $messagesScroll.clientHeight;
+  _userScrolledUp = distFromBottom > 60;
+}, { passive: true });
+
 // ── Init ──────────────────────────────────────────────────────────────────────
 async function init() {
   loadContext();
@@ -1389,6 +1398,7 @@ function renderMessages(messages, conv) {
     if (msg.role === 'user')      addUserBubble(msg.content);
     if (msg.role === 'assistant') addStaticAssistantBubble(msg.content);
   });
+  _userScrolledUp = false;
   scrollToBottom(false);
 }
 
@@ -1484,6 +1494,7 @@ async function sendMessage() {
   setGenerating(true);
   document.getElementById('welcome')?.remove();
 
+  _userScrolledUp = false; // L'utilisateur envoie → on reprend le suivi auto
   addUserBubble(text, files);
   showTyping(true);
   const bubble = createAssistantBubble();
@@ -2476,7 +2487,8 @@ function addCopyButtons(el) {
 
   });
 }
-function scrollToBottom(smooth = false) {
+function scrollToBottom(smooth = false, force = false) {
+  if (_userScrolledUp && !force) return; // L'utilisateur a scrollé manuellement → on ne force pas
   $messagesScroll.scrollTo({ top: $messagesScroll.scrollHeight, behavior: smooth ? 'smooth' : 'instant' });
 }
 function setGenerating(v) {
